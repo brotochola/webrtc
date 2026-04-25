@@ -4,62 +4,175 @@
     <meta charset="UTF-8">
     <title>WebRTC Chat</title>
     <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
-        h2 { margin-bottom: 16px; color: #fff; }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            padding: 20px;
+        }
+
+        h2 {
+            margin-bottom: 16px;
+            color: #fff;
+        }
 
         /* Lobby */
-        #lobby { max-width: 480px; }
-        #channels-list { margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; }
+        #lobby {
+            max-width: 480px;
+        }
+
+        #channels-list {
+            margin-bottom: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
         .channel-btn {
-            background: #1e1e1e; border: 1px solid #333; color: #e0e0e0;
-            padding: 10px 14px; border-radius: 6px; cursor: pointer;
-            text-align: left; font-size: 14px; display: flex; justify-content: space-between;
+            background: #1e1e1e;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 10px 14px;
+            border-radius: 6px;
+            cursor: pointer;
+            text-align: left;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
         }
-        .channel-btn:hover { background: #2a2a2a; border-color: #555; }
-        .channel-count { color: #888; font-size: 12px; }
-        .join-row { display: flex; gap: 8px; }
+
+        .channel-btn:hover {
+            background: #2a2a2a;
+            border-color: #555;
+        }
+
+        .channel-count {
+            color: #888;
+            font-size: 12px;
+        }
+
+        .join-row {
+            display: flex;
+            gap: 8px;
+        }
+
         .join-row input {
-            flex: 1; padding: 9px 12px; background: #1e1e1e;
-            border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 14px;
+            flex: 1;
+            padding: 9px 12px;
+            background: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 14px;
         }
-        .join-row input:focus { outline: none; border-color: #555; }
+
+        .join-row input:focus {
+            outline: none;
+            border-color: #555;
+        }
 
         /* Shared button */
         button.action {
-            background: #2563eb; border: none; color: #fff;
-            padding: 9px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;
+            background: #2563eb;
+            border: none;
+            color: #fff;
+            padding: 9px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
         }
-        button.action:hover { background: #1d4ed8; }
-        button.action.secondary { background: #374151; }
-        button.action.secondary:hover { background: #4b5563; }
+
+        button.action:hover {
+            background: #1d4ed8;
+        }
+
+        button.action.secondary {
+            background: #374151;
+        }
+
+        button.action.secondary:hover {
+            background: #4b5563;
+        }
 
         /* Room */
-        #room-view { max-width: 560px; }
+        #room-view {
+            max-width: 560px;
+        }
+
         #room-header {
-            display: flex; align-items: center; gap: 12px;
-            margin-bottom: 12px; padding-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            padding-bottom: 12px;
             border-bottom: 1px solid #222;
         }
-        #room-title { font-size: 16px; font-weight: bold; flex: 1; }
+
+        #room-title {
+            font-size: 16px;
+            font-weight: bold;
+            flex: 1;
+        }
+
         #room-status {
-            font-size: 12px; padding: 3px 8px; border-radius: 12px;
-            background: #1e1e1e; border: 1px solid #333; color: #888;
+            font-size: 12px;
+            padding: 3px 8px;
+            border-radius: 12px;
+            background: #1e1e1e;
+            border: 1px solid #333;
+            color: #888;
         }
-        #room-status.connected { border-color: #16a34a; color: #4ade80; }
+
+        #room-status.connected {
+            border-color: #16a34a;
+            color: #4ade80;
+        }
+
         #log {
-            background: #111; border: 1px solid #222; border-radius: 6px;
-            padding: 12px; height: 260px; overflow-y: auto;
-            font-size: 13px; line-height: 1.5; margin-bottom: 10px;
-            white-space: pre-wrap; word-break: break-word;
+            background: #111;
+            border: 1px solid #222;
+            border-radius: 6px;
+            padding: 12px;
+            height: 260px;
+            overflow-y: auto;
+            font-size: 13px;
+            line-height: 1.5;
+            margin-bottom: 10px;
+            white-space: pre-wrap;
+            word-break: break-word;
         }
-        .send-row { display: flex; gap: 8px; }
+
+        .send-row {
+            display: flex;
+            gap: 8px;
+        }
+
         .send-row input {
-            flex: 1; padding: 9px 12px; background: #1e1e1e;
-            border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 14px;
+            flex: 1;
+            padding: 9px 12px;
+            background: #1e1e1e;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: #e0e0e0;
+            font-size: 14px;
         }
-        .send-row input:focus { outline: none; border-color: #555; }
-        #no-channels { color: #555; font-size: 13px; padding: 8px 0; }
+
+        .send-row input:focus {
+            outline: none;
+            border-color: #555;
+        }
+
+        #no-channels {
+            color: #555;
+            font-size: 13px;
+            padding: 8px 0;
+        }
     </style>
 </head>
 <body>
@@ -116,27 +229,27 @@
         };
 
         const app = initializeApp(firebaseConfig);
-        const db  = getDatabase(app);
+        const db = getDatabase(app);
 
         // ID único para esta sesión
         const myId = Math.random().toString(36).slice(2);
         console.log("[init] myId:", myId);
 
         // ── UI refs ──────────────────────────────────────────────────
-        const lobbyEl       = document.getElementById("lobby");
-        const roomViewEl    = document.getElementById("room-view");
-        const channelsListEl= document.getElementById("channels-list");
-        const channelInput  = document.getElementById("channel-input");
-        const roomTitleEl   = document.getElementById("room-title");
-        const statusEl      = document.getElementById("room-status");
-        const logEl         = document.getElementById("log");
-        const msgInput      = document.getElementById("msg");
+        const lobbyEl = document.getElementById("lobby");
+        const roomViewEl = document.getElementById("room-view");
+        const channelsListEl = document.getElementById("channels-list");
+        const channelInput = document.getElementById("channel-input");
+        const roomTitleEl = document.getElementById("room-title");
+        const statusEl = document.getElementById("room-status");
+        const logEl = document.getElementById("log");
+        const msgInput = document.getElementById("msg");
 
         // ── State ────────────────────────────────────────────────────
         let pc, dc, roomId, isCaller;
         let pendingCandidates = [];
-        let candidatesUnsub   = null;
-        let reconnectTimer    = null;
+        let candidatesUnsub = null;
+        let reconnectTimer = null;
 
         const TEN_MIN = 10 * 60 * 1000;
 
@@ -144,7 +257,7 @@
         async function cleanupOldRooms() {
             const snap = await get(ref(db, "rooms"));
             if (!snap.exists()) return;
-            const now   = Date.now();
+            const now = Date.now();
             const rooms = snap.val();
             const deletes = [];
             for (const [name, data] of Object.entries(rooms)) {
@@ -174,7 +287,7 @@
             }
 
             for (const [name, data] of entries) {
-                const count   = data.presence ? Object.keys(data.presence).length : 0;
+                const count = data.presence ? Object.keys(data.presence).length : 0;
                 const lastUse = data?.meta?.last_use ?? data?.meta?.date_created;
                 const timeStr = lastUse ? timeAgo(lastUse) : "";
 
@@ -193,12 +306,12 @@
 
         // ── Entrar a una sala ─────────────────────────────────────────
         async function enterRoom(name) {
-            roomId        = name;
-            isCaller      = false;
+            roomId = name;
+            isCaller = false;
             pendingCandidates = [];
 
-            lobbyEl.hidden    = false; // lobby sigue visible debajo (por referencia)
-            lobbyEl.hidden    = true;
+            lobbyEl.hidden = false; // lobby sigue visible debajo (por referencia)
+            lobbyEl.hidden = true;
             roomViewEl.hidden = false;
             roomTitleEl.textContent = `#${roomId}`;
             setStatus("conectando...", false);
@@ -213,7 +326,7 @@
             console.log("[room] presencia registrada");
 
             // Meta: crear o actualizar last_use
-            const metaRef  = ref(db, `rooms/${roomId}/meta`);
+            const metaRef = ref(db, `rooms/${roomId}/meta`);
             const metaSnap = await get(metaRef);
             if (!metaSnap.exists()) {
                 await set(metaRef, { date_created: Date.now(), last_use: Date.now() });
@@ -300,7 +413,7 @@
                 get(ref(db, `rooms/${roomId}/presence`)),
             ]);
             const lockedById = lockSnap.val();
-            const presence   = presSnap.val() || {};
+            const presence = presSnap.val() || {};
 
             if (lockedById && !presence[lockedById]) {
                 console.log(`[join] lock stale (${lockedById} ya no está), limpiando sala...`);
@@ -420,7 +533,7 @@
                 initDrawing(dc, drawingContainer);
             };
             dc.onclose = () => { console.log("[DC] closed"); };
-            dc.onerror = e  => console.error("[DC] error:", e);
+            dc.onerror = e => console.error("[DC] error:", e);
             // Solo mostrar en el chat los mensajes de texto; los binarios los maneja drawing.js
             dc.onmessage = e => {
                 if (typeof e.data === "string") {
@@ -456,9 +569,9 @@
 
         function timeAgo(ts) {
             const diff = Date.now() - ts;
-            if (diff < 60_000)       return "hace menos de 1 min";
-            if (diff < 3_600_000)    return `hace ${Math.floor(diff / 60_000)} min`;
-            if (diff < 86_400_000)   return `hace ${Math.floor(diff / 3_600_000)}h`;
+            if (diff < 60_000) return "hace menos de 1 min";
+            if (diff < 3_600_000) return `hace ${Math.floor(diff / 60_000)} min`;
+            if (diff < 86_400_000) return `hace ${Math.floor(diff / 3_600_000)}h`;
             return `hace ${Math.floor(diff / 86_400_000)}d`;
         }
 
@@ -497,7 +610,7 @@
             roomId = null;
             isCaller = false;
             roomViewEl.hidden = true;
-            lobbyEl.hidden    = false;
+            lobbyEl.hidden = false;
             cleanupOldRooms();
         }
 
@@ -515,7 +628,7 @@
         document.getElementById("btn-leave").addEventListener("click", leaveRoom);
 
         // ── Auto-join al cargar ───────────────────────────────────────
-        cleanupOldRooms().then(() => enterRoom("default"));
+        cleanupOldRooms()//.then(() => enterRoom("default"));
     </script>
 
 </body>
