@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>WebRTC Chat</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 20px; }
+        h2 { margin-bottom: 16px; color: #fff; }
+
+        /* Lobby */
+        #lobby { max-width: 480px; }
+        #channels-list { margin-bottom: 16px; display: flex; flex-direction: column; gap: 8px; }
+        .channel-btn {
+            background: #1e1e1e; border: 1px solid #333; color: #e0e0e0;
+            padding: 10px 14px; border-radius: 6px; cursor: pointer;
+            text-align: left; font-size: 14px; display: flex; justify-content: space-between;
+        }
+        .channel-btn:hover { background: #2a2a2a; border-color: #555; }
+        .channel-count { color: #888; font-size: 12px; }
+        .join-row { display: flex; gap: 8px; }
+        .join-row input {
+            flex: 1; padding: 9px 12px; background: #1e1e1e;
+            border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 14px;
+        }
+        .join-row input:focus { outline: none; border-color: #555; }
+
+        /* Shared button */
+        button.action {
+            background: #2563eb; border: none; color: #fff;
+            padding: 9px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;
+        }
+        button.action:hover { background: #1d4ed8; }
+        button.action.secondary { background: #374151; }
+        button.action.secondary:hover { background: #4b5563; }
+
+        /* Room */
+        #room-view { max-width: 560px; }
+        #room-header {
+            display: flex; align-items: center; gap: 12px;
+            margin-bottom: 12px; padding-bottom: 12px;
+            border-bottom: 1px solid #222;
+        }
+        #room-title { font-size: 16px; font-weight: bold; flex: 1; }
+        #room-status {
+            font-size: 12px; padding: 3px 8px; border-radius: 12px;
+            background: #1e1e1e; border: 1px solid #333; color: #888;
+        }
+        #room-status.connected { border-color: #16a34a; color: #4ade80; }
+        #log {
+            background: #111; border: 1px solid #222; border-radius: 6px;
+            padding: 12px; height: 260px; overflow-y: auto;
+            font-size: 13px; line-height: 1.5; margin-bottom: 10px;
+            white-space: pre-wrap; word-break: break-word;
+        }
+        .send-row { display: flex; gap: 8px; }
+        .send-row input {
+            flex: 1; padding: 9px 12px; background: #1e1e1e;
+            border: 1px solid #333; border-radius: 6px; color: #e0e0e0; font-size: 14px;
+        }
+        .send-row input:focus { outline: none; border-color: #555; }
+        #no-channels { color: #555; font-size: 13px; padding: 8px 0; }
+    </style>
+</head>
+<body>
+
+    <!-- LOBBY -->
+    <div id="lobby">
+        <h2>WebRTC Chat</h2>
+        <div id="channels-list">
+            <div id="no-channels">Cargando canales...</div>
+        </div>
+        <div class="join-row">
+            <input id="channel-input" value="default" placeholder="nombre del canal">
+            <button class="action" id="btn-join-channel">Entrar</button>
+        </div>
+    </div>
+
+    <!-- ROOM -->
+    <div id="room-view" hidden>
+        <div id="room-header">
+            <span id="room-title"></span>
+            <span id="room-status">conectando...</span>
+            <button class="action secondary" id="btn-leave">← Salir</button>
+        </div>
+
+        <!-- Canvas de dibujo colaborativo -->
+        <div id="drawing-container" style="margin-bottom:12px"></div>
+
+        <pre id="log"></pre>
+        <div class="send-row">
+            <input id="msg" placeholder="escribí un mensaje...">
+            <button class="action" id="btn-send">Enviar</button>
+        </div>
+    </div>
+
+    <!-- ICE servers list (expone global `iceServers`) -->
+    <script src="iceServers.js"></script>
+
+    <script type="module">
+        import { initDrawing, destroyDrawing } from "./drawing.js";
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import {
+            getDatabase, ref, set, update, push, remove, get,
+            onChildAdded, onValue, runTransaction, onDisconnect
+        } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyA2PW7pAnTSrutVDYabtwL7Q3JB2Mir3Pw",
+            authDomain: "webrtc-5c119.firebaseapp.com",
+            databaseURL: "https://webrtc-5c119-default-rtdb.firebaseio.com",
+            projectId: "webrtc-5c119",
+            storageBucket: "webrtc-5c119.firebasestorage.app",
+            messagingSenderId: "334466186648",
+            appId: "1:334466186648:web:10429db094bf249c203fed"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db  = getDatabase(app);
+
+        // ID único para esta sesión
+        const myId = Math.random().toString(36).slice(2);
+        console.log("[init] myId:", myId);
+
+        // ── UI refs ──────────────────────────────────────────────────
+        const lobbyEl       = document.getElementById("lobby");
+        const roomViewEl    = document.getElementById("room-view");
+        const channelsListEl= document.getElementById("channels-list");
+        const channelInput  = document.getElementById("channel-input");
+        const roomTitleEl   = document.getElementById("room-title");
+        const statusEl      = document.getElementById("room-status");
+        const logEl         = document.getElementById("log");
+        const msgInput      = document.getElementById("msg");
+
+        // ── State ────────────────────────────────────────────────────
+        let pc, dc, roomId, isCaller;
+        let pendingCandidates = [];
+        let candidatesUnsub   = null;
+        let reconnectTimer    = null;
+
+        const TEN_MIN = 10 * 60 * 1000;
+
+        // ── Limpieza de canales viejos ────────────────────────────────
+        async function cleanupOldRooms() {
+            const snap = await get(ref(db, "rooms"));
+            if (!snap.exists()) return;
+            const now   = Date.now();
+            const rooms = snap.val();
+            const deletes = [];
+            for (const [name, data] of Object.entries(rooms)) {
+                const lastUse = data?.meta?.last_use ?? data?.meta?.date_created ?? 0;
+                if (now - lastUse > TEN_MIN) {
+                    console.log(`[cleanup] borrando "${name}" — último uso: ${new Date(lastUse).toLocaleTimeString()}`);
+                    deletes.push(remove(ref(db, `rooms/${name}`)));
+                }
+            }
+            if (deletes.length) {
+                await Promise.all(deletes);
+                console.log(`[cleanup] ${deletes.length} canal(es) eliminado(s)`);
+            }
+        }
+
+        // ── Lobby: escuchar canales en tiempo real ───────────────────
+        onValue(ref(db, "rooms"), snap => {
+            const rooms = snap.val() || {};
+            channelsListEl.innerHTML = "";
+
+            const entries = Object.entries(rooms)
+                .filter(([, data]) => data && data.presence);
+
+            if (entries.length === 0) {
+                channelsListEl.innerHTML = '<div id="no-channels">No hay canales activos aún.</div>';
+                return;
+            }
+
+            for (const [name, data] of entries) {
+                const count   = data.presence ? Object.keys(data.presence).length : 0;
+                const lastUse = data?.meta?.last_use ?? data?.meta?.date_created;
+                const timeStr = lastUse ? timeAgo(lastUse) : "";
+
+                const btn = document.createElement("button");
+                btn.className = "channel-btn";
+                btn.innerHTML = `
+                    <span>#${name}</span>
+                    <span style="display:flex;flex-direction:column;align-items:flex-end;gap:2px">
+                        <span class="channel-count">${count} conectado${count !== 1 ? "s" : ""}</span>
+                        ${timeStr ? `<span style="color:#555;font-size:11px">${timeStr}</span>` : ""}
+                    </span>`;
+                btn.addEventListener("click", () => enterRoom(name));
+                channelsListEl.appendChild(btn);
+            }
+        });
+
+        // ── Entrar a una sala ─────────────────────────────────────────
+        async function enterRoom(name) {
+            roomId        = name;
+            isCaller      = false;
+            pendingCandidates = [];
+
+            lobbyEl.hidden    = false; // lobby sigue visible debajo (por referencia)
+            lobbyEl.hidden    = true;
+            roomViewEl.hidden = false;
+            roomTitleEl.textContent = `#${roomId}`;
+            setStatus("conectando...", false);
+            logEl.textContent = "";
+
+            console.log(`[room] entrando a "${roomId}" como myId=${myId}`);
+
+            // Presencia: nos registramos y nos borramos al desconectar
+            const presRef = ref(db, `rooms/${roomId}/presence/${myId}`);
+            await set(presRef, true);
+            onDisconnect(presRef).remove();
+            console.log("[room] presencia registrada");
+
+            // Meta: crear o actualizar last_use
+            const metaRef  = ref(db, `rooms/${roomId}/meta`);
+            const metaSnap = await get(metaRef);
+            if (!metaSnap.exists()) {
+                await set(metaRef, { date_created: Date.now(), last_use: Date.now() });
+                console.log("[room] meta creado");
+            } else {
+                await update(metaRef, { last_use: Date.now() });
+                console.log("[room] meta.last_use actualizado");
+            }
+
+            await startWebRTC();
+        }
+
+        // ── WebRTC ────────────────────────────────────────────────────
+        async function startWebRTC() {
+            // Usar la lista de iceServers.js (global expuesta por el <script>)
+            pc = new RTCPeerConnection({ iceServers: window.iceServers });
+            console.log("[PC] RTCPeerConnection creada con", window.iceServers?.[0]?.urls?.length ?? 0, "STUN URLs");
+
+            pc.onicecandidate = e => {
+                if (e.candidate) {
+                    const role = isCaller ? "A" : "B";
+                    console.log(`[ICE] candidato local (${role}):`, e.candidate.candidate);
+                    push(ref(db, `rooms/${roomId}/candidates`), {
+                        from: role,
+                        candidate: e.candidate.toJSON()
+                    });
+                } else {
+                    console.log("[ICE] gathering completo");
+                }
+            };
+
+            pc.onicegatheringstatechange = () =>
+                console.log("[ICE] gatheringState →", pc.iceGatheringState);
+
+            pc.oniceconnectionstatechange = () =>
+                console.log("[ICE] iceConnectionState →", pc.iceConnectionState);
+
+            pc.onconnectionstatechange = () => {
+                const s = pc.connectionState;
+                console.log("[PC] connectionState →", s);
+                setStatus(s, s === "connected");
+
+                if (s === "connected") {
+                    log("🟢 conectado");
+                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                }
+
+                if (s === "failed") {
+                    log("🔴 conexión fallida — reconectando...");
+                    scheduleReconnect(500);
+                }
+
+                if (s === "disconnected") {
+                    // "disconnected" puede ser transitorio (network blip),
+                    // esperamos 4s antes de reiniciar por si se recupera solo.
+                    log("🟡 el otro se desconectó — esperando...");
+                    scheduleReconnect(4000);
+                }
+            };
+
+            pc.ondatachannel = e => {
+                console.log("[DC] ondatachannel:", e.channel.label);
+                dc = e.channel;
+                setupDC();
+            };
+
+            // Registrar listener de candidatos ANTES de la negociación
+            // para no perder candidatos que lleguen durante el handshake
+            if (candidatesUnsub) candidatesUnsub();
+            candidatesUnsub = onChildAdded(ref(db, `rooms/${roomId}/candidates`), snap => {
+                const data = snap.val();
+                const expectedFrom = isCaller ? "B" : "A";
+                if (data.from !== expectedFrom) return;
+                console.log(`[ICE] candidato remoto (from=${data.from}):`, data.candidate?.candidate);
+                pendingCandidates.push(data.candidate);
+                flushCandidates();
+            });
+
+            // ── Detectar lock stale: si callerClaimed tiene un ID que ya no
+            //    está en presencia, el caller anterior desconectó sin limpiar.
+            const lockR = ref(db, `rooms/${roomId}/callerClaimed`);
+            const [lockSnap, presSnap] = await Promise.all([
+                get(lockR),
+                get(ref(db, `rooms/${roomId}/presence`)),
+            ]);
+            const lockedById = lockSnap.val();
+            const presence   = presSnap.val() || {};
+
+            if (lockedById && !presence[lockedById]) {
+                console.log(`[join] lock stale (${lockedById} ya no está), limpiando sala...`);
+                await Promise.all([
+                    remove(lockR),
+                    remove(ref(db, `rooms/${roomId}/offer`)),
+                    remove(ref(db, `rooms/${roomId}/answer`)),
+                    remove(ref(db, `rooms/${roomId}/candidates`)),
+                ]);
+            }
+
+            // Transacción atómica: guardamos nuestro myId para poder detectar
+            // si somos nosotros los que nos fuimos sin limpiar (stale detection).
+            console.log("[join] intentando reclamar rol de caller...");
+            const tx = await runTransaction(lockR, current => {
+                if (current === null) return myId; // reclamo con mi ID
+                return;                            // ya reclamado, aborto
+            });
+            console.log("[join] transacción committed:", tx.committed);
+
+            if (tx.committed) {
+                // ─── SOY A (caller) ───────────────────────────────────
+                isCaller = true;
+                console.log("[join] soy A — creando offer");
+
+                // Cuando A cierre la pestaña, Firebase limpia todo el estado
+                // de señalización para que la próxima sesión arranque limpia.
+                onDisconnect(lockR).remove();
+                onDisconnect(ref(db, `rooms/${roomId}/offer`)).remove();
+                onDisconnect(ref(db, `rooms/${roomId}/answer`)).remove();
+                onDisconnect(ref(db, `rooms/${roomId}/candidates`)).remove();
+
+                dc = pc.createDataChannel("chat");
+                console.log("[DC] createDataChannel('chat')");
+                setupDC();
+
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                console.log("[SDP] setLocalDescription(offer)");
+
+                // Trickle ICE: subir el SDP enseguida, sin esperar a que terminen
+                // de llegar todos los candidatos. Los candidatos fluyen solos via onicecandidate.
+                await set(ref(db, `rooms/${roomId}/offer`), offer);
+                console.log("[Firebase] offer subido");
+
+                // Escuchar answer de B
+                onValue(ref(db, `rooms/${roomId}/answer`), async snap => {
+                    if (!snap.exists() || pc.currentRemoteDescription) return;
+                    console.log("[Firebase] answer recibido → setRemoteDescription...");
+                    try {
+                        await pc.setRemoteDescription(snap.val());
+                        console.log("[SDP] setRemoteDescription(answer) OK");
+                        await flushCandidates();
+                    } catch (e) {
+                        console.error("[SDP] setRemoteDescription(answer) ERROR:", e);
+                    }
+                });
+
+            } else {
+                // ─── SOY B (callee) ───────────────────────────────────
+                console.log("[join] soy B — esperando offer...");
+
+                await new Promise(resolve => {
+                    let unsub;
+                    unsub = onValue(ref(db, `rooms/${roomId}/offer`), async snap => {
+                        if (!snap.exists()) return;
+                        // Diferir la desinscrición: Firebase puede disparar el callback
+                        // sincrónicamente (cache), antes de que `unsub` quede asignado.
+                        queueMicrotask(() => unsub && unsub());
+                        console.log("[Firebase] offer recibido → setRemoteDescription...");
+                        try {
+                            await pc.setRemoteDescription(snap.val());
+                            console.log("[SDP] setRemoteDescription(offer) OK");
+                            await flushCandidates();
+                        } catch (e) {
+                            console.error("[SDP] setRemoteDescription(offer) ERROR:", e);
+                        }
+
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        console.log("[SDP] setLocalDescription(answer)");
+
+                        // Trickle ICE: subir el answer de inmediato.
+                        await set(ref(db, `rooms/${roomId}/answer`), answer);
+                        console.log("[Firebase] answer subido");
+                        resolve();
+                    });
+                });
+            }
+        }
+
+        // ── Helpers WebRTC ────────────────────────────────────────────
+
+        async function scheduleReconnect(delayMs) {
+            if (reconnectTimer) clearTimeout(reconnectTimer);
+            reconnectTimer = setTimeout(async () => {
+                reconnectTimer = null;
+                if (!roomId) return; // ya salimos de la sala
+                console.log("[reconnect] reiniciando WebRTC...");
+                log("↻ reconectando...");
+                if (pc) { pc.close(); pc = null; }
+                if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
+                pendingCandidates = [];
+                isCaller = false;
+                await startWebRTC();
+            }, delayMs);
+        }
+
+        const drawingContainer = document.getElementById("drawing-container");
+
+        function setupDC() {
+            dc.onopen = () => {
+                console.log("[DC] open!");
+                log("🟢 conectado");
+                // Inicializar el módulo de dibujo cuando el canal esté listo
+                destroyDrawing(); // limpiar instancia anterior si existía
+                initDrawing(dc, drawingContainer);
+            };
+            dc.onclose = () => { console.log("[DC] closed"); };
+            dc.onerror = e  => console.error("[DC] error:", e);
+            // Solo mostrar en el chat los mensajes de texto; los binarios los maneja drawing.js
+            dc.onmessage = e => {
+                if (typeof e.data === "string") {
+                    console.log("[DC] mensaje:", e.data);
+                    log("📩 " + e.data);
+                }
+            };
+        }
+
+        async function flushCandidates() {
+            if (!pc || !pc.remoteDescription) {
+                console.log(`[ICE] flush diferido — sin remoteDescription (${pendingCandidates.length} en cola)`);
+                return;
+            }
+            console.log(`[ICE] flush — procesando ${pendingCandidates.length} candidatos`);
+            while (pendingCandidates.length) {
+                const init = pendingCandidates.shift();
+                if (!init || !init.candidate) continue;
+                const patched = { ...init };
+                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
+                try {
+                    await pc.addIceCandidate(patched);
+                    console.log("[ICE] addIceCandidate OK");
+                } catch (e) {
+                    console.error("[ICE] addIceCandidate ERROR:", e);
+                }
+            }
+        }
+
+        // ── UI helpers ────────────────────────────────────────────────
+
+        function log(t) { logEl.textContent += t + "\n"; }
+
+        function timeAgo(ts) {
+            const diff = Date.now() - ts;
+            if (diff < 60_000)       return "hace menos de 1 min";
+            if (diff < 3_600_000)    return `hace ${Math.floor(diff / 60_000)} min`;
+            if (diff < 86_400_000)   return `hace ${Math.floor(diff / 3_600_000)}h`;
+            return `hace ${Math.floor(diff / 86_400_000)}d`;
+        }
+
+        function setStatus(text, connected) {
+            statusEl.textContent = text;
+            statusEl.className = connected ? "connected" : "";
+        }
+
+        function send() {
+            if (dc && dc.readyState === "open") {
+                dc.send(msgInput.value);
+                log("📤 " + msgInput.value);
+                msgInput.value = "";
+            } else {
+                log("⚠️ no conectado");
+            }
+        }
+
+        async function leaveRoom() {
+            destroyDrawing();
+            if (pc) { pc.close(); pc = null; }
+            if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
+            if (roomId) {
+                const cleanups = [remove(ref(db, `rooms/${roomId}/presence/${myId}`))];
+                if (isCaller) {
+                    // A limpia el estado de señalización al salir manualmente
+                    cleanups.push(
+                        remove(ref(db, `rooms/${roomId}/callerClaimed`)),
+                        remove(ref(db, `rooms/${roomId}/offer`)),
+                        remove(ref(db, `rooms/${roomId}/answer`)),
+                        remove(ref(db, `rooms/${roomId}/candidates`)),
+                    );
+                }
+                await Promise.all(cleanups);
+            }
+            roomId = null;
+            isCaller = false;
+            roomViewEl.hidden = true;
+            lobbyEl.hidden    = false;
+            cleanupOldRooms();
+        }
+
+        // ── Event listeners ───────────────────────────────────────────
+
+        document.getElementById("btn-join-channel").addEventListener("click", () => {
+            const name = channelInput.value.trim();
+            if (name) enterRoom(name);
+        });
+
+        document.getElementById("btn-send").addEventListener("click", send);
+
+        msgInput.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+
+        document.getElementById("btn-leave").addEventListener("click", leaveRoom);
+
+        // ── Auto-join al cargar ───────────────────────────────────────
+        cleanupOldRooms().then(() => enterRoom("default"));
+    </script>
+
+</body>
+</html>
