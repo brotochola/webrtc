@@ -13,6 +13,7 @@ let _pc          = null;
 let localStream  = null;
 let camEnabled   = false;
 let micEnabled   = false;
+let pipVisible   = false;  // si el recuadro de video local está visible
 
 let _wrapper      = null;
 let _videoSection = null;
@@ -20,7 +21,9 @@ let _localVideo   = null;
 let _remoteVideo  = null;
 let _btnCam       = null;
 let _btnMic       = null;
-let _camSelect    = null;   // selector de cámara (aparece tras dar permiso)
+let _btnPip       = null;   // botón "ver mi cámara" cuando PiP está oculto
+let _pipBox       = null;   // recuadro PiP del video local
+let _camSelect    = null;
 
 let _listeners = [];
 
@@ -29,47 +32,75 @@ let _listeners = [];
 export function initMedia(pc, containerEl) {
     _pc = pc;
 
-    // ── Toolbar ──────────────────────────────────────────────────────────
+    // ── Toolbar de controles ─────────────────────────────────────────────
     const controls = document.createElement("div");
-    controls.style.cssText = "display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center;";
+    controls.className = "media-controls";
 
     _btnCam = makeBtn("📷 Cámara");
     _btnMic = makeBtn("🎤 Micrófono");
     on(_btnCam, "click", toggleCam);
     on(_btnMic, "click", toggleMic);
-    controls.append(_btnCam, _btnMic);
+
+    _btnPip = makeBtn("👁 Mi cámara");
+    _btnPip.style.display = "none";
+    on(_btnPip, "click", showPip);
+
+    controls.append(_btnCam, _btnMic, _btnPip);
 
     // ── Sección de video ─────────────────────────────────────────────────
     _videoSection = document.createElement("div");
-    _videoSection.style.cssText = "display:none;margin-bottom:12px;";
+    _videoSection.className = "media-video-section";
+    _videoSection.style.display = "none";
 
-    const videosDiv = document.createElement("div");
-    videosDiv.style.cssText = "display:flex;gap:8px;";
+    // Video remoto (principal, grande)
+    const remoteBox = document.createElement("div");
+    remoteBox.className = "media-remote-box";
 
-    const localBox  = makeVideoBox("Tú");
-    const remoteBox = makeVideoBox("Remoto");
-    _localVideo  = localBox.video;
-    _remoteVideo = remoteBox.video;
-    _localVideo.muted = true;
+    _remoteVideo = document.createElement("video");
+    _remoteVideo.autoplay    = true;
+    _remoteVideo.playsInline = true;
+    _remoteVideo.className   = "media-remote-video";
 
-    videosDiv.append(localBox.el, remoteBox.el);
-    _videoSection.appendChild(videosDiv);
+    const remoteLbl = makeLbl("Remoto");
+    remoteBox.append(_remoteVideo, remoteLbl);
+
+    // Video local (PiP overlay)
+    _pipBox = document.createElement("div");
+    _pipBox.className = "media-pip";
+    _pipBox.style.display = "none";
+
+    _localVideo = document.createElement("video");
+    _localVideo.autoplay    = true;
+    _localVideo.playsInline = true;
+    _localVideo.muted       = true;
+    _localVideo.className   = "media-pip-video";
+
+    const pipLbl = makeLbl("Tú");
+
+    const pipCloseBtn = document.createElement("button");
+    pipCloseBtn.className   = "media-pip-close";
+    pipCloseBtn.title       = "Ocultar mi video";
+    pipCloseBtn.textContent = "×";
+    on(pipCloseBtn, "click", hidePip);
+
+    _pipBox.append(_localVideo, pipLbl, pipCloseBtn);
+    remoteBox.appendChild(_pipBox);
+
+    _videoSection.appendChild(remoteBox);
 
     _wrapper = document.createElement("div");
+    _wrapper.className = "media-wrap";
     _wrapper.append(controls, _videoSection);
     containerEl.appendChild(_wrapper);
 
     // ── Track remoto ──────────────────────────────────────────────────────
-    // ontrack se dispara al negociar transceivers; onunmute indica que
-    // el peer realmente está mandando datos. Manejamos ambos casos.
     _pc.ontrack = e => {
-        console.log("[media] ontrack:", e.track.kind, "| muted:", e.track.muted, "| streams:", e.streams.length);
+        console.log("[media] ontrack:", e.track.kind, "| muted:", e.track.muted);
 
         if (_remoteVideo) {
             if (e.streams[0]) {
                 _remoteVideo.srcObject = e.streams[0];
             } else {
-                // addTransceiver sin stream asociado → construir MediaStream manualmente
                 if (!(_remoteVideo.srcObject instanceof MediaStream)) {
                     _remoteVideo.srcObject = new MediaStream();
                 }
@@ -85,14 +116,9 @@ export function initMedia(pc, containerEl) {
         };
 
         e.track.onunmute = revealVideo;
-
-        // Algunos browsers ya tienen el track "unmuted" cuando llega ontrack
-        // (especialmente en loopback/mismo equipo). Verificar de inmediato.
         if (!e.track.muted) revealVideo();
     };
 
-    // Fallback: cuando el <video> realmente empieza a renderizar frames
-    // (más confiable que onunmute cuando el sender activa cámara vía replaceTrack)
     _remoteVideo.addEventListener("playing", () => {
         if (_videoSection) {
             _videoSection.style.display = "";
@@ -107,13 +133,14 @@ export function destroyMedia() {
     stopStream();
     camEnabled = false;
     micEnabled = false;
+    pipVisible = false;
 
     _listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));
     _listeners = [];
 
     _wrapper?.remove();
     _wrapper = _videoSection = _localVideo = _remoteVideo = null;
-    _btnCam = _btnMic = _camSelect = null;
+    _pipBox = _btnCam = _btnMic = _btnPip = _camSelect = null;
     _pc = null;
 
     console.log("[media] destruido");
@@ -134,8 +161,20 @@ async function toggleCam() {
         if (sender) await sender.replaceTrack(camEnabled ? track : null);
     }
 
-    if (_localVideo) _localVideo.srcObject = camEnabled ? localStream : null;
-    refreshVideoSectionVisibility();
+    if (camEnabled) {
+        if (_localVideo) _localVideo.srcObject = localStream;
+        pipVisible = true;
+        if (_pipBox)  _pipBox.style.display = "";
+        if (_btnPip)  _btnPip.style.display = "none";
+        if (_videoSection) _videoSection.style.display = "";
+    } else {
+        if (_localVideo) _localVideo.srcObject = null;
+        pipVisible = false;
+        if (_pipBox)  _pipBox.style.display = "none";
+        if (_btnPip)  _btnPip.style.display = "none";
+        refreshVideoSectionVisibility();
+    }
+
     updateButtons();
 }
 
@@ -155,10 +194,23 @@ async function toggleMic() {
     updateButtons();
 }
 
+function hidePip() {
+    pipVisible = false;
+    if (_pipBox) _pipBox.style.display = "none";
+    if (_btnPip) _btnPip.style.display = "";
+}
+
+function showPip() {
+    if (!camEnabled) return;
+    pipVisible = true;
+    if (_pipBox) _pipBox.style.display = "";
+    if (_btnPip) _btnPip.style.display = "none";
+}
+
 // ── Selector de cámara ────────────────────────────────────────────────────
 
 async function buildCamSelector() {
-    if (!_btnCam || _camSelect) return; // ya existe o UI destruida
+    if (!_btnCam || _camSelect) return;
 
     let devices;
     try {
@@ -166,20 +218,15 @@ async function buildCamSelector() {
     } catch { return; }
 
     const videoInputs = devices.filter(d => d.kind === "videoinput");
-    if (videoInputs.length < 2) return; // con una sola cámara no hace falta
+    if (videoInputs.length < 2) return;
 
     _camSelect = document.createElement("select");
-    _camSelect.style.cssText = [
-        "background:#1e1e1e", "border:1px solid #333", "color:#e0e0e0",
-        "border-radius:6px", "padding:5px 8px", "font-size:12px",
-        "cursor:pointer", "max-width:160px",
-    ].join(";");
+    _camSelect.className = "media-cam-select";
 
     for (const [i, d] of videoInputs.entries()) {
         const opt = document.createElement("option");
         opt.value = d.deviceId;
         opt.textContent = d.label || `Cámara ${i + 1}`;
-        // Pre-seleccionar la cámara actualmente en uso
         if (localStream?.getVideoTracks()[0]?.getSettings().deviceId === d.deviceId) {
             opt.selected = true;
         }
@@ -187,8 +234,6 @@ async function buildCamSelector() {
     }
 
     on(_camSelect, "change", e => switchCamera(e.target.value));
-
-    // Insertar después de los botones
     _btnCam.parentElement.appendChild(_camSelect);
     console.log("[media] selector de cámara añadido:", videoInputs.length, "dispositivos");
 }
@@ -209,12 +254,10 @@ async function switchCamera(deviceId) {
         return;
     }
 
-    // Parar y reemplazar el track viejo en el stream local
     localStream.getVideoTracks().forEach(t => { t.stop(); localStream.removeTrack(t); });
     newTrack.enabled = camEnabled;
     localStream.addTrack(newTrack);
 
-    // Reemplazar en el peer connection (sin renegociación)
     if (_pc && camEnabled) {
         const sender = findSenderByKind("video");
         if (sender) await sender.replaceTrack(newTrack);
@@ -231,7 +274,6 @@ async function acquireStream() {
     try {
         localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
         localStream.getTracks().forEach(t => { t.enabled = false; });
-        // Mostrar selector de cámara después de obtener permiso (ahora los labels están disponibles)
         await buildCamSelector();
         return true;
     } catch (e) {
@@ -262,47 +304,32 @@ function refreshVideoSectionVisibility() {
 
 function updateButtons() {
     if (_btnCam) {
-        _btnCam.textContent  = camEnabled ? "📷 Cámara ●" : "📷 Cámara";
-        _btnCam.style.background = camEnabled ? "#16a34a" : "#374151";
+        _btnCam.textContent = camEnabled ? "📷 Cámara ●" : "📷 Cámara";
+        _btnCam.classList.toggle("active", camEnabled);
     }
     if (_btnMic) {
-        _btnMic.textContent  = micEnabled ? "🎤 Micrófono ●" : "🎤 Micrófono";
-        _btnMic.style.background = micEnabled ? "#16a34a" : "#374151";
+        _btnMic.textContent = micEnabled ? "🎤 Mic ●" : "🎤 Micrófono";
+        _btnMic.classList.toggle("active", micEnabled);
+    }
+    if (_btnPip) {
+        _btnPip.style.display = (camEnabled && !pipVisible) ? "" : "none";
     }
 }
 
 // ── Constructores DOM ─────────────────────────────────────────────────────
 
-function makeVideoBox(label) {
-    const el = document.createElement("div");
-    el.style.cssText = [
-        "flex:1", "position:relative", "background:#000",
-        "border-radius:6px", "border:1px solid #222", "overflow:hidden",
-    ].join(";");
-
-    const video = document.createElement("video");
-    video.autoplay    = true;
-    video.playsInline = true;
-    video.style.cssText = "width:100%;display:block;aspect-ratio:4/3;object-fit:cover;";
-
-    const lbl = document.createElement("span");
-    lbl.textContent = label;
-    lbl.style.cssText = [
-        "position:absolute", "bottom:6px", "left:8px",
-        "font-size:11px", "color:#aaa",
-        "background:rgba(0,0,0,0.55)", "padding:2px 6px", "border-radius:3px",
-    ].join(";");
-
-    el.append(video, lbl);
-    return { el, video };
-}
-
 function makeBtn(text) {
     const btn = document.createElement("button");
     btn.className   = "action secondary";
     btn.textContent = text;
-    btn.style.cssText = "font-size:13px;";
     return btn;
+}
+
+function makeLbl(text) {
+    const lbl = document.createElement("span");
+    lbl.className   = "media-label";
+    lbl.textContent = text;
+    return lbl;
 }
 
 function on(el, ev, fn) {

@@ -107,6 +107,13 @@ export function initDrawing(dataChannel, containerEl) {
     wrapper.append(toolbar, canvasWrap);
     containerEl.appendChild(wrapper);
 
+    // En algunos browsers móviles el height del canvas-wrap no se computa
+    // hasta el siguiente frame si el layout aún no finalizó; forzamos recalculo.
+    requestAnimationFrame(() => {
+        const h = canvasWrap.getBoundingClientRect().height;
+        if (h > 0) cursorCanvas.style.height = h + "px";
+    });
+
     // Eventos de ratón
     on(cursorCanvas, "mousemove",  handleMouseMove);
     on(cursorCanvas, "mousedown",  handleMouseDown);

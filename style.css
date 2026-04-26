@@ -338,6 +338,146 @@ button.action.secondary:hover {
     overflow: hidden;
 }
 
+/* ── Media module ─────────────────────────────────────────────────────── */
+.media-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.media-controls {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.media-cam-select {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: var(--radius-sm);
+    padding: 6px 10px;
+    font-size: 0.8rem;
+    font-family: inherit;
+    cursor: pointer;
+    max-width: 180px;
+    outline: none;
+    transition: border-color var(--transition);
+}
+
+.media-cam-select:focus {
+    border-color: var(--accent);
+}
+
+/* Active state for cam/mic buttons */
+button.action.active {
+    background: #16a34a;
+    border-color: transparent;
+    color: #fff;
+}
+
+button.action.active:hover {
+    background: #15803d;
+    box-shadow: 0 0 14px #16a34a44;
+}
+
+/* Video section */
+.media-video-section {
+    width: 100%;
+}
+
+/* Remote video: big, 16:9 */
+.media-remote-box {
+    position: relative;
+    width: 100%;
+    background: #000;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    border: 1px solid var(--border);
+}
+
+.media-remote-video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    background: #000;
+}
+
+/* Label overlay */
+.media-label {
+    position: absolute;
+    bottom: 10px;
+    left: 12px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #ccc;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 2px 8px;
+    border-radius: 20px;
+    pointer-events: none;
+    backdrop-filter: blur(4px);
+}
+
+/* Local PiP overlay */
+.media-pip {
+    position: absolute;
+    bottom: 14px;
+    right: 14px;
+    width: 28%;
+    max-width: 180px;
+    min-width: 100px;
+    border-radius: var(--radius-sm);
+    overflow: hidden;
+    border: 2px solid rgba(255,255,255,0.18);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+    background: #000;
+    transition: opacity var(--transition);
+}
+
+.media-pip:hover {
+    opacity: 0.92;
+}
+
+.media-pip-video {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+}
+
+/* PiP label sits inside .media-pip — override position */
+.media-pip .media-label {
+    bottom: 4px;
+    left: 6px;
+    font-size: 0.65rem;
+}
+
+/* Close button for PiP */
+.media-pip-close {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0,0,0,0.65);
+    color: #fff;
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    display: grid;
+    place-items: center;
+    transition: background var(--transition);
+    backdrop-filter: blur(4px);
+}
+
+.media-pip-close:hover {
+    background: rgba(239, 68, 68, 0.8);
+}
+
 /* ── Drawing module ───────────────────────────────────────────────────── */
 .drawing-wrap {
     display: flex;
@@ -404,10 +544,13 @@ button.action.secondary:hover {
 .drawing-canvas-wrap {
     position: relative;
     width: 100%;
-    /* Prevent aspect-ratio issues: altura relativa al ancho */
     aspect-ratio: 900 / 540;
     background: #111;
     overflow: hidden;
+    /* Evitar que el browser maneje gestos táctiles en toda el área */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 /* drawCanvas ocupa todo el wrap, pointer-events desactivado (el cursorCanvas recibe input) */
@@ -416,6 +559,8 @@ canvas.drawing-canvas {
     width: 100%;
     height: 100%;
     pointer-events: none;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 /* cursorCanvas encima, recibe todos los eventos */
@@ -426,7 +571,9 @@ canvas.drawing-cursor {
     width: 100%;
     height: 100%;
     cursor: crosshair;
-    touch-action: none;  /* bloquea scroll/zoom del browser al dibujar */
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
 }
 
 /* Log */
@@ -537,6 +684,24 @@ canvas.drawing-cursor {
     .drawing-color {
         width: 38px;
         height: 38px;
+    }
+
+    /* PiP más grande en mobile (pantalla chica) */
+    .media-pip {
+        width: 36%;
+        bottom: 8px;
+        right: 8px;
+    }
+
+    .media-pip-close {
+        width: 26px;
+        height: 26px;
+        font-size: 16px;
+    }
+
+    /* Controles media más compactos */
+    .media-controls {
+        gap: 6px;
     }
 }
 
