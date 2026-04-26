@@ -91,6 +91,15 @@ export function initMedia(pc, containerEl) {
         if (!e.track.muted) revealVideo();
     };
 
+    // Fallback: cuando el <video> realmente empieza a renderizar frames
+    // (más confiable que onunmute cuando el sender activa cámara vía replaceTrack)
+    _remoteVideo.addEventListener("playing", () => {
+        if (_videoSection) {
+            _videoSection.style.display = "";
+            console.log("[media] remoteVideo playing → mostrando sección");
+        }
+    });
+
     console.log("[media] inicializado, pc.ontrack instalado");
 }
 

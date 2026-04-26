@@ -1,186 +1,24 @@
 <!DOCTYPE html>
-<html>
+<html lang="es">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WebRTC Chat</title>
-    <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            font-family: sans-serif;
-            background: #0f0f0f;
-            color: #e0e0e0;
-            padding: 20px;
-        }
-
-        h2 {
-            margin-bottom: 16px;
-            color: #fff;
-        }
-
-        /* Lobby */
-        #lobby {
-            max-width: 480px;
-        }
-
-        #channels-list {
-            margin-bottom: 16px;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-        }
-
-        .channel-btn {
-            background: #1e1e1e;
-            border: 1px solid #333;
-            color: #e0e0e0;
-            padding: 10px 14px;
-            border-radius: 6px;
-            cursor: pointer;
-            text-align: left;
-            font-size: 14px;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .channel-btn:hover {
-            background: #2a2a2a;
-            border-color: #555;
-        }
-
-        .channel-count {
-            color: #888;
-            font-size: 12px;
-        }
-
-        .join-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .join-row input {
-            flex: 1;
-            padding: 9px 12px;
-            background: #1e1e1e;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #e0e0e0;
-            font-size: 14px;
-        }
-
-        .join-row input:focus {
-            outline: none;
-            border-color: #555;
-        }
-
-        /* Shared button */
-        button.action {
-            background: #2563eb;
-            border: none;
-            color: #fff;
-            padding: 9px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 14px;
-        }
-
-        button.action:hover {
-            background: #1d4ed8;
-        }
-
-        button.action.secondary {
-            background: #374151;
-        }
-
-        button.action.secondary:hover {
-            background: #4b5563;
-        }
-
-        /* Room */
-        #room-view {
-            max-width: 560px;
-        }
-
-        #room-header {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 12px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #222;
-        }
-
-        #room-title {
-            font-size: 16px;
-            font-weight: bold;
-            flex: 1;
-        }
-
-        #room-status {
-            font-size: 12px;
-            padding: 3px 8px;
-            border-radius: 12px;
-            background: #1e1e1e;
-            border: 1px solid #333;
-            color: #888;
-        }
-
-        #room-status.connected {
-            border-color: #16a34a;
-            color: #4ade80;
-        }
-
-        #log {
-            background: #111;
-            border: 1px solid #222;
-            border-radius: 6px;
-            padding: 12px;
-            height: 260px;
-            overflow-y: auto;
-            font-size: 13px;
-            line-height: 1.5;
-            margin-bottom: 10px;
-            white-space: pre-wrap;
-            word-break: break-word;
-        }
-
-        .send-row {
-            display: flex;
-            gap: 8px;
-        }
-
-        .send-row input {
-            flex: 1;
-            padding: 9px 12px;
-            background: #1e1e1e;
-            border: 1px solid #333;
-            border-radius: 6px;
-            color: #e0e0e0;
-            font-size: 14px;
-        }
-
-        .send-row input:focus {
-            outline: none;
-            border-color: #555;
-        }
-
-        #no-channels {
-            color: #555;
-            font-size: 13px;
-            padding: 8px 0;
-        }
-    </style>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
     <!-- LOBBY -->
-    <div id="lobby">
-        <h2>WebRTC Chat</h2>
+    <div id="lobby" class="page-card">
+        <div class="lobby-header">
+            <div class="lobby-icon">💬</div>
+            <div>
+                <h2>WebRTC Chat</h2>
+                <div class="lobby-subtitle">Peer-to-peer · cifrado · sin servidor</div>
+            </div>
+        </div>
         <div id="channels-list">
+            <div class="channels-label">Canales activos</div>
             <div id="no-channels">Cargando canales...</div>
         </div>
         <div class="join-row">
@@ -201,11 +39,11 @@
         <div id="media-container"></div>
 
         <!-- Canvas de dibujo colaborativo -->
-        <div id="drawing-container" style="margin-bottom:12px"></div>
+        <div id="drawing-container"></div>
 
         <pre id="log"></pre>
         <div class="send-row">
-            <input id="msg" placeholder="escribí un mensaje...">
+            <input id="msg" placeholder="Escribí un mensaje…">
             <button class="action" id="btn-send">Enviar</button>
         </div>
     </div>
@@ -287,9 +125,11 @@
                 .filter(([, data]) => data && data.presence);
 
             if (entries.length === 0) {
-                channelsListEl.innerHTML = '<div id="no-channels">No hay canales activos aún.</div>';
+                channelsListEl.innerHTML = '<div class="channels-label">Canales activos</div><div id="no-channels">No hay canales activos aún.</div>';
                 return;
             }
+
+            channelsListEl.innerHTML = '<div class="channels-label">Canales activos</div>';
 
             for (const [name, data] of entries) {
                 const count = data.presence ? Object.keys(data.presence).length : 0;
@@ -300,10 +140,11 @@
                 btn.className = "channel-btn";
 
                 const nameSpan = document.createElement("span");
-                nameSpan.textContent = `#${name}`;
+                nameSpan.className = "channel-name";
+                nameSpan.textContent = name;
 
                 const metaSpan = document.createElement("span");
-                metaSpan.style.cssText = "display:flex;flex-direction:column;align-items:flex-end;gap:2px";
+                metaSpan.className = "channel-meta";
 
                 const countSpan = document.createElement("span");
                 countSpan.className = "channel-count";
@@ -312,7 +153,7 @@
 
                 if (timeStr) {
                     const timeSpan = document.createElement("span");
-                    timeSpan.style.cssText = "color:#555;font-size:11px";
+                    timeSpan.className = "channel-time";
                     timeSpan.textContent = timeStr;
                     metaSpan.appendChild(timeSpan);
                 }
@@ -334,7 +175,7 @@
             lobbyEl.hidden = false; // lobby sigue visible debajo (por referencia)
             lobbyEl.hidden = true;
             roomViewEl.hidden = false;
-            roomTitleEl.textContent = `#${roomId}`;
+            roomTitleEl.textContent = roomId;
             setStatus("conectando...", false);
             logEl.textContent = "";
 
@@ -548,6 +389,13 @@
                             await pc.setRemoteDescription({ type, sdp });
                             console.log("[SDP] setRemoteDescription(offer) OK");
                             await flushCandidates();
+
+                            // Forzar sendrecv en todos los transceivers para que B
+                            // también pueda enviar media (Chrome puede generar recvonly
+                            // si no hay track asignado al sender todavía).
+                            for (const t of pc.getTransceivers()) {
+                                if (t.direction === "recvonly") t.direction = "sendrecv";
+                            }
 
                             const answer    = await pc.createAnswer();
                             await pc.setLocalDescription(answer);

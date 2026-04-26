@@ -1,0 +1,547 @@
+/* ── Reset & Base ─────────────────────────────────────────────────────── */
+*, *::before, *::after {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+:root {
+    --bg:          #0a0a0f;
+    --surface:     #12121a;
+    --surface-2:   #1a1a26;
+    --border:      #ffffff12;
+    --border-hover:#ffffff22;
+    --accent:      #6c63ff;
+    --accent-dark: #5549e8;
+    --accent-glow: #6c63ff44;
+    --text:        #e2e2f0;
+    --text-muted:  #6b6b88;
+    --text-dim:    #3a3a55;
+    --green:       #22c55e;
+    --green-glow:  #22c55e33;
+    --yellow:      #eab308;
+    --red:         #ef4444;
+    --radius-sm:   6px;
+    --radius-md:   10px;
+    --radius-lg:   16px;
+    --shadow:      0 4px 24px #00000055;
+    --transition:  150ms ease;
+}
+
+html {
+    height: 100%;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 24px 16px 48px;
+    /* Subtle grid background */
+    background-image:
+        radial-gradient(ellipse 80% 50% at 50% -20%, #6c63ff18, transparent);
+}
+
+/* ── Typography ───────────────────────────────────────────────────────── */
+h2 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    color: #fff;
+}
+
+/* ── Layout wrapper ───────────────────────────────────────────────────── */
+.page-card {
+    width: 100%;
+    max-width: 520px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
+    padding: 28px 24px;
+    animation: fadeUp 0.25s ease both;
+}
+
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Lobby ────────────────────────────────────────────────────────────── */
+#lobby {
+    width: 100%;
+    max-width: 520px;
+}
+
+.lobby-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 24px;
+}
+
+.lobby-icon {
+    width: 36px;
+    height: 36px;
+    background: var(--accent-glow);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-sm);
+    display: grid;
+    place-items: center;
+    font-size: 18px;
+    flex-shrink: 0;
+}
+
+.lobby-subtitle {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+/* Channels list */
+#channels-list {
+    margin-bottom: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.channels-label {
+    font-size: 0.7rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
+#no-channels {
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    padding: 16px 0;
+    text-align: center;
+}
+
+.channel-btn {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 12px 14px;
+    border-radius: var(--radius-md);
+    cursor: pointer;
+    text-align: left;
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    transition: background var(--transition), border-color var(--transition), transform var(--transition);
+    width: 100%;
+}
+
+.channel-btn:hover {
+    background: #1e1e2e;
+    border-color: var(--accent);
+    transform: translateX(2px);
+}
+
+.channel-btn:active {
+    transform: translateX(0);
+}
+
+.channel-name {
+    font-weight: 500;
+    color: #fff;
+}
+
+.channel-name::before {
+    content: "#";
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 1px;
+}
+
+.channel-meta {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.channel-count {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.channel-count::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+}
+
+.channel-time {
+    font-size: 0.7rem;
+    color: var(--text-dim);
+}
+
+/* Join row */
+.join-row {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.join-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* ── Shared Inputs ────────────────────────────────────────────────────── */
+input[type="text"],
+input:not([type]) {
+    padding: 10px 14px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    color: var(--text);
+    font-size: 0.875rem;
+    font-family: inherit;
+    transition: border-color var(--transition), box-shadow var(--transition);
+    outline: none;
+    width: 100%;
+}
+
+input[type="text"]:focus,
+input:not([type]):focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+input::placeholder {
+    color: var(--text-muted);
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+button.action {
+    background: var(--accent);
+    border: none;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 0.875rem;
+    font-weight: 500;
+    font-family: inherit;
+    white-space: nowrap;
+    transition: background var(--transition), transform var(--transition), box-shadow var(--transition);
+}
+
+button.action:hover {
+    background: var(--accent-dark);
+    box-shadow: 0 0 16px var(--accent-glow);
+    transform: translateY(-1px);
+}
+
+button.action:active {
+    transform: translateY(0);
+    box-shadow: none;
+}
+
+button.action.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+}
+
+button.action.secondary:hover {
+    background: var(--surface-2);
+    border-color: var(--border-hover);
+    color: var(--text);
+    box-shadow: none;
+}
+
+/* ── Room ─────────────────────────────────────────────────────────────── */
+#room-view {
+    width: 100%;
+    max-width: 640px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+#room-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+}
+
+#room-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    flex: 1;
+    color: #fff;
+}
+
+#room-title::before {
+    content: "#";
+    color: var(--accent);
+    font-weight: 700;
+}
+
+#room-status {
+    font-size: 0.7rem;
+    font-weight: 500;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    white-space: nowrap;
+    transition: color var(--transition), border-color var(--transition), box-shadow var(--transition);
+}
+
+#room-status.connected {
+    border-color: var(--green);
+    color: var(--green);
+    box-shadow: 0 0 8px var(--green-glow);
+}
+
+/* Media & Drawing containers */
+#media-container {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+#drawing-container {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+/* ── Drawing module ───────────────────────────────────────────────────── */
+.drawing-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.drawing-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 12px;
+}
+
+.drawing-color {
+    width: 34px;
+    height: 34px;
+    border: 2px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: none;
+    cursor: pointer;
+    padding: 2px;
+    flex-shrink: 0;
+    transition: border-color var(--transition);
+}
+
+.drawing-color:hover {
+    border-color: var(--accent);
+}
+
+.drawing-size-label {
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    user-select: none;
+}
+
+.drawing-size-range {
+    width: 80px;
+    accent-color: var(--accent);
+    cursor: pointer;
+    /* Override generic input styles */
+    background: none !important;
+    border: none !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    width: 80px !important;
+}
+
+.drawing-btn {
+    padding: 5px 12px !important;
+    font-size: 0.775rem !important;
+    flex-shrink: 0;
+}
+
+.drawing-canvas-wrap {
+    position: relative;
+    width: 100%;
+    /* Prevent aspect-ratio issues: altura relativa al ancho */
+    aspect-ratio: 900 / 540;
+    background: #111;
+    overflow: hidden;
+}
+
+/* drawCanvas ocupa todo el wrap, pointer-events desactivado (el cursorCanvas recibe input) */
+canvas.drawing-canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+}
+
+/* cursorCanvas encima, recibe todos los eventos */
+canvas.drawing-cursor {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    touch-action: none;  /* bloquea scroll/zoom del browser al dibujar */
+}
+
+/* Log */
+#log {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 16px;
+    height: 240px;
+    overflow-y: auto;
+    font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+    font-size: 0.8rem;
+    line-height: 1.7;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-muted);
+    scroll-behavior: smooth;
+}
+
+#log::-webkit-scrollbar {
+    width: 4px;
+}
+
+#log::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+#log::-webkit-scrollbar-thumb {
+    background: var(--text-dim);
+    border-radius: 4px;
+}
+
+/* Send row */
+.send-row {
+    display: flex;
+    gap: 8px;
+}
+
+.send-row input {
+    flex: 1;
+    min-width: 0;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────── */
+@media (max-width: 520px) {
+    body {
+        padding: 10px 10px 32px;
+    }
+
+    .page-card {
+        padding: 18px 14px;
+        border-radius: var(--radius-md);
+    }
+
+    h2 {
+        font-size: 1.2rem;
+    }
+
+    .lobby-subtitle {
+        font-size: 0.72rem;
+    }
+
+    /* Room header: título en primera fila, status+botón en segunda */
+    #room-header {
+        flex-wrap: wrap;
+        row-gap: 8px;
+        padding: 12px 14px;
+    }
+
+    #room-title {
+        font-size: 0.9rem;
+        width: 100%;
+    }
+
+    #room-status {
+        font-size: 0.68rem;
+        margin-left: auto;
+    }
+
+    button.action {
+        padding: 9px 13px;
+        font-size: 0.825rem;
+    }
+
+    /* Log más compacto en mobile */
+    #log {
+        height: 180px;
+        font-size: 0.75rem;
+        padding: 12px;
+    }
+
+    /* Toolbar de dibujo: apilar en dos filas limpias */
+    .drawing-toolbar {
+        padding: 8px 10px;
+        gap: 6px;
+    }
+
+    .drawing-size-range {
+        width: 64px !important;
+    }
+
+    .drawing-btn {
+        padding: 7px 12px !important;
+        font-size: 0.8rem !important;
+    }
+
+    /* Botones táctiles más grandes para dedos */
+    .drawing-color {
+        width: 38px;
+        height: 38px;
+    }
+}
+
+@media (min-width: 640px) {
+    #room-view {
+        max-width: 700px;
+    }
+}

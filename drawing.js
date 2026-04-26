@@ -50,60 +50,53 @@ export function initDrawing(dataChannel, containerEl) {
 
     // Wrapper total
     const wrapper = document.createElement("div");
-    wrapper.style.cssText = "margin-bottom:12px;";
+    wrapper.className = "drawing-wrap";
 
     // ── Toolbar ──
     const toolbar = document.createElement("div");
-    toolbar.style.cssText = [
-        "display:flex", "align-items:center", "gap:10px",
-        "margin-bottom:6px", "flex-wrap:wrap",
-        "background:#161616", "border:1px solid #222",
-        "border-radius:6px", "padding:6px 10px",
-    ].join(";");
+    toolbar.className = "drawing-toolbar";
 
     // Color picker
     const colorInput = document.createElement("input");
-    colorInput.type  = "color";
-    colorInput.value = localColor;
-    colorInput.title = "Color del pincel";
-    colorInput.style.cssText = "width:32px;height:28px;border:none;background:none;cursor:pointer;padding:0;border-radius:3px;";
+    colorInput.type      = "color";
+    colorInput.value     = localColor;
+    colorInput.title     = "Color del pincel";
+    colorInput.className = "drawing-color";
     on(colorInput, "input", e => { localColor = e.target.value; });
 
     // Tamaño
     const sizeWrap = document.createElement("label");
-    sizeWrap.style.cssText = "color:#888;font-size:12px;display:flex;align-items:center;gap:5px;user-select:none;";
-    sizeWrap.textContent   = "Tamaño";
+    sizeWrap.className   = "drawing-size-label";
+    sizeWrap.textContent = "Tamaño";
     const sizeInput = document.createElement("input");
-    sizeInput.type  = "range";
-    sizeInput.min   = 1;
-    sizeInput.max   = 40;
-    sizeInput.value = localSize;
-    sizeInput.style.cssText = "width:80px;accent-color:#6366f1;";
+    sizeInput.type      = "range";
+    sizeInput.min       = 1;
+    sizeInput.max       = 40;
+    sizeInput.value     = localSize;
+    sizeInput.className = "drawing-size-range";
     on(sizeInput, "input", e => { localSize = +e.target.value; });
     sizeWrap.appendChild(sizeInput);
 
     // Borrador
     const eraserBtn = document.createElement("button");
-    eraserBtn.textContent = "Borrador";
-    eraserBtn.className   = "action secondary";
-    eraserBtn.style.cssText = "padding:4px 10px;font-size:12px;";
+    eraserBtn.textContent = "✏️ Borrador";
+    eraserBtn.className   = "action secondary drawing-btn";
     on(eraserBtn, "click", () => { localColor = "#111111"; colorInput.value = "#111111"; });
 
     // Limpiar canvas (local + remoto)
     const clearBtn = document.createElement("button");
-    clearBtn.textContent = "Limpiar todo";
-    clearBtn.className   = "action secondary";
-    clearBtn.style.cssText = "padding:4px 10px;font-size:12px;";
+    clearBtn.textContent = "🗑️ Limpiar";
+    clearBtn.className   = "action secondary drawing-btn";
     on(clearBtn, "click", () => { clearCanvas(); sendMsg(buildByte(MSG_CLEAR)); });
 
     toolbar.append(colorInput, sizeWrap, eraserBtn, clearBtn);
 
     // ── Canvas stack ──
     const canvasWrap = document.createElement("div");
-    canvasWrap.style.cssText = "position:relative;width:100%;";
+    canvasWrap.className = "drawing-canvas-wrap";
 
-    drawCanvas   = makeCanvas("background:#111;border:1px solid #222;border-radius:6px;display:block;width:100%;pointer-events:none;");
-    cursorCanvas = makeCanvas("position:absolute;top:0;left:0;display:block;width:100%;border-radius:6px;cursor:crosshair;");
+    drawCanvas   = makeCanvas("drawing-canvas");
+    cursorCanvas = makeCanvas("drawing-cursor");
 
     drawCtx   = drawCanvas.getContext("2d");
     cursorCtx = cursorCanvas.getContext("2d");
@@ -114,11 +107,17 @@ export function initDrawing(dataChannel, containerEl) {
     wrapper.append(toolbar, canvasWrap);
     containerEl.appendChild(wrapper);
 
-    // Eventos de ratón en el cursorCanvas (encima)
+    // Eventos de ratón
     on(cursorCanvas, "mousemove",  handleMouseMove);
     on(cursorCanvas, "mousedown",  handleMouseDown);
     on(cursorCanvas, "mouseup",    handleMouseUp);
     on(cursorCanvas, "mouseleave", handleMouseLeave);
+
+    // Eventos táctiles (passive:false para poder llamar preventDefault)
+    on(cursorCanvas, "touchstart",  handleTouchStart, { passive: false });
+    on(cursorCanvas, "touchmove",   handleTouchMove,  { passive: false });
+    on(cursorCanvas, "touchend",    handleTouchEnd,   { passive: false });
+    on(cursorCanvas, "touchcancel", handleTouchEnd,   { passive: false });
 
     // Mensajes binarios del peer
     on(dc, "message", handleMessage);
@@ -129,7 +128,7 @@ export function initDrawing(dataChannel, containerEl) {
 
 export function destroyDrawing() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
-    listeners.forEach(([el, ev, fn]) => el.removeEventListener(ev, fn));
+    listeners.forEach(([el, ev, fn, opts]) => el.removeEventListener(ev, fn, opts));
     listeners = [];
     drawCanvas?.remove();   drawCanvas   = null; drawCtx   = null;
     cursorCanvas?.remove(); cursorCanvas = null; cursorCtx = null;
@@ -143,7 +142,7 @@ export function destroyDrawing() {
 // ── Eventos de ratón ──────────────────────────────────────────────────────
 
 function handleMouseMove(e) {
-    const [nx, ny] = norm(e);
+    const [nx, ny] = norm(e.clientX, e.clientY);
 
     if (isDrawing) {
         const [cx, cy] = toCanvas(nx, ny);
@@ -167,7 +166,7 @@ function handleMouseMove(e) {
 
 function handleMouseDown(e) {
     if (e.button !== 0) return;
-    const [nx, ny] = norm(e);
+    const [nx, ny] = norm(e.clientX, e.clientY);
     isDrawing  = true;
     localPrevX = nx; localPrevY = ny;
     sendMsg(buildDrawBegin(nx, ny));
@@ -180,6 +179,37 @@ function handleMouseUp() {
 }
 
 function handleMouseLeave() {
+    if (!isDrawing) return;
+    isDrawing = false;
+    sendMsg(buildByte(MSG_DRAW_END));
+}
+
+// ── Eventos táctiles ──────────────────────────────────────────────────────
+
+function handleTouchStart(e) {
+    e.preventDefault();
+    const t = e.touches[0];
+    if (!t) return;
+    const [nx, ny] = norm(t.clientX, t.clientY);
+    isDrawing  = true;
+    localPrevX = nx; localPrevY = ny;
+    sendMsg(buildDrawBegin(nx, ny));
+}
+
+function handleTouchMove(e) {
+    e.preventDefault();
+    const t = e.touches[0];
+    if (!t || !isDrawing) return;
+    const [nx, ny] = norm(t.clientX, t.clientY);
+    const [cx, cy] = toCanvas(nx, ny);
+    const [px, py] = toCanvas(localPrevX, localPrevY);
+    drawLine(drawCtx, px, py, cx, cy, localColor, localSize);
+    localPrevX = nx; localPrevY = ny;
+    sendMsg(buildPoint(MSG_DRAW_POINT, nx, ny));
+}
+
+function handleTouchEnd(e) {
+    e.preventDefault();
     if (!isDrawing) return;
     isDrawing = false;
     sendMsg(buildByte(MSG_DRAW_END));
@@ -329,11 +359,11 @@ function drawRemoteCursor(x, y, active) {
 
 // ── Utils ─────────────────────────────────────────────────────────────────
 
-/** Coordenadas normalizadas 0-65535 del evento relativas al canvas */
-function norm(e) {
+/** Coordenadas normalizadas 0-65535 a partir de clientX/clientY relativas al canvas */
+function norm(clientX, clientY) {
     const rect = cursorCanvas.getBoundingClientRect();
-    const nx = Math.max(0, Math.min(MAX_U16, Math.round(((e.clientX - rect.left) / rect.width)  * MAX_U16)));
-    const ny = Math.max(0, Math.min(MAX_U16, Math.round(((e.clientY - rect.top)  / rect.height) * MAX_U16)));
+    const nx = Math.max(0, Math.min(MAX_U16, Math.round(((clientX - rect.left) / rect.width)  * MAX_U16)));
+    const ny = Math.max(0, Math.min(MAX_U16, Math.round(((clientY - rect.top)  / rect.height) * MAX_U16)));
     return [nx, ny];
 }
 
@@ -349,15 +379,15 @@ function fromNorm(v, offset) {
     return toCanvas(nx, ny);
 }
 
-function makeCanvas(style) {
+function makeCanvas(className) {
     const c = document.createElement("canvas");
-    c.width  = CANVAS_W;
-    c.height = CANVAS_H;
-    c.style.cssText = style;
+    c.width     = CANVAS_W;
+    c.height    = CANVAS_H;
+    c.className = className;
     return c;
 }
 
-function on(el, ev, fn) {
-    el.addEventListener(ev, fn);
-    listeners.push([el, ev, fn]);
+function on(el, ev, fn, opts) {
+    el.addEventListener(ev, fn, opts);
+    listeners.push([el, ev, fn, opts]);
 }
