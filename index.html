@@ -197,6 +197,9 @@
             <button class="action secondary" id="btn-leave">← Salir</button>
         </div>
 
+        <!-- Controles de cámara/micrófono y video (media.js) -->
+        <div id="media-container"></div>
+
         <!-- Canvas de dibujo colaborativo -->
         <div id="drawing-container" style="margin-bottom:12px"></div>
 
@@ -212,6 +215,8 @@
 
     <script type="module">
         import { initDrawing, destroyDrawing } from "./drawing.js";
+        import { initMedia, destroyMedia }     from "./media.js";
+        import { deriveRoomKey, encryptVal, decryptVal } from "./crypto-utils.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import {
             getDatabase, ref, set, update, push, remove, get,
@@ -246,7 +251,7 @@
         const msgInput = document.getElementById("msg");
 
         // ── State ────────────────────────────────────────────────────
-        let pc, dc, roomId, isCaller;
+        let pc, dc, roomId, roomKey, isCaller;
         let pendingCandidates = [];
         let candidatesUnsub = null;
         let reconnectTimer = null;
@@ -322,6 +327,7 @@
         // ── Entrar a una sala ─────────────────────────────────────────
         async function enterRoom(name) {
             roomId = name;
+            roomKey = await deriveRoomKey(name);
             isCaller = false;
             pendingCandidates = [];
 
@@ -340,14 +346,16 @@
             onDisconnect(presRef).remove();
             console.log("[room] presencia registrada");
 
-            // Meta: crear o actualizar last_use
+            // Meta: crear o actualizar last_use — redondeado a 5 min para reducir
+            // la precisión temporal disponible en Firebase.
+            const roundedNow = Math.floor(Date.now() / 300_000) * 300_000;
             const metaRef = ref(db, `rooms/${roomId}/meta`);
             const metaSnap = await get(metaRef);
             if (!metaSnap.exists()) {
-                await set(metaRef, { date_created: Date.now(), last_use: Date.now() });
+                await set(metaRef, { date_created: roundedNow, last_use: roundedNow });
                 console.log("[room] meta creado");
             } else {
-                await update(metaRef, { last_use: Date.now() });
+                await update(metaRef, { last_use: roundedNow });
                 console.log("[room] meta.last_use actualizado");
             }
 
@@ -360,14 +368,12 @@
             pc = new RTCPeerConnection({ iceServers: window.iceServers });
             console.log("[PC] RTCPeerConnection creada con", window.iceServers?.[0]?.urls?.length ?? 0, "STUN URLs");
 
-            pc.onicecandidate = e => {
+            pc.onicecandidate = async e => {
                 if (e.candidate) {
                     const role = isCaller ? "A" : "B";
                     console.log(`[ICE] candidato local (${role}):`, e.candidate.candidate);
-                    push(ref(db, `rooms/${roomId}/candidates`), {
-                        from: role,
-                        candidate: e.candidate.toJSON()
-                    });
+                    const enc = await encryptVal(roomKey, { from: role, candidate: e.candidate.toJSON() });
+                    push(ref(db, `rooms/${roomId}/candidates`), enc);
                 } else {
                     console.log("[ICE] gathering completo");
                 }
@@ -387,6 +393,8 @@
                 if (s === "connected") {
                     log("🟢 conectado");
                     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                    // Borrar candidates de Firebase — ya no hacen falta y contienen IPs.
+                    remove(ref(db, `rooms/${roomId}/candidates`));
                 }
 
                 if (s === "failed") {
@@ -411,8 +419,10 @@
             // Registrar listener de candidatos ANTES de la negociación
             // para no perder candidatos que lleguen durante el handshake
             if (candidatesUnsub) candidatesUnsub();
-            candidatesUnsub = onChildAdded(ref(db, `rooms/${roomId}/candidates`), snap => {
-                const data = snap.val();
+            candidatesUnsub = onChildAdded(ref(db, `rooms/${roomId}/candidates`), async snap => {
+                let data;
+                try { data = await decryptVal(roomKey, snap.val()); }
+                catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
                 const expectedFrom = isCaller ? "B" : "A";
                 if (data.from !== expectedFrom) return;
                 console.log(`[ICE] candidato remoto (from=${data.from}):`, data.candidate?.candidate);
@@ -465,21 +475,46 @@
                 console.log("[DC] createDataChannel('chat')");
                 setupDC();
 
-                const offer = await pc.createOffer();
-                await pc.setLocalDescription(offer);
-                console.log("[SDP] setLocalDescription(offer)");
+                // Pre-negociar video y audio: los transceivers quedan en el SDP
+                // desde el primer offer, así replaceTrack funciona sin renegociación.
+                pc.addTransceiver("video", { direction: "sendrecv" });
+                pc.addTransceiver("audio", { direction: "sendrecv" });
 
-                // Trickle ICE: subir el SDP enseguida, sin esperar a que terminen
-                // de llegar todos los candidatos. Los candidatos fluyen solos via onicecandidate.
-                await set(ref(db, `rooms/${roomId}/offer`), offer);
-                console.log("[Firebase] offer subido");
+                initMedia(pc, mediaContainer);
 
-                // Escuchar answer de B
-                onValue(ref(db, `rooms/${roomId}/answer`), async snap => {
-                    if (!snap.exists() || pc.currentRemoteDescription) return;
-                    console.log("[Firebase] answer recibido → setRemoteDescription...");
+                let negotiationSeq = 0;
+                let lastAnswerSeq  = 0;
+
+                // onnegotiationneeded crea el offer inicial (disparado por
+                // createDataChannel + addTransceiver) y maneja renegociaciones futuras.
+                pc.onnegotiationneeded = async () => {
+                    if (pc.signalingState !== "stable") return;
+                    negotiationSeq++;
+                    const seq = negotiationSeq;
+                    console.log(`[SDP] onnegotiationneeded (seq=${seq})`);
                     try {
-                        await pc.setRemoteDescription(snap.val());
+                        const offer    = await pc.createOffer();
+                        await pc.setLocalDescription(offer);
+                        const encOffer = await encryptVal(roomKey, { type: offer.type, sdp: offer.sdp, seq });
+                        await set(ref(db, `rooms/${roomId}/offer`), encOffer);
+                        console.log(`[Firebase] offer subido cifrado (seq=${seq})`);
+                    } catch (e) {
+                        console.error("[SDP] onnegotiationneeded error:", e);
+                    }
+                };
+
+                // Escuchar answer de B — seq-based para soportar renegociación
+                onValue(ref(db, `rooms/${roomId}/answer`), async snap => {
+                    if (!snap.exists()) return;
+                    let type, sdp, seq;
+                    try {
+                        ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val()));
+                    } catch (e) { console.warn("[Firebase] no se pudo descifrar answer:", e); return; }
+                    if (seq <= lastAnswerSeq) return;
+                    lastAnswerSeq = seq;
+                    console.log(`[Firebase] answer descifrado (seq=${seq}) → setRemoteDescription...`);
+                    try {
+                        await pc.setRemoteDescription({ type, sdp });
                         console.log("[SDP] setRemoteDescription(answer) OK");
                         await flushCandidates();
                     } catch (e) {
@@ -491,30 +526,40 @@
                 // ─── SOY B (callee) ───────────────────────────────────
                 console.log("[join] soy B — esperando offer...");
 
+                // initMedia DEBE ir antes del primer setRemoteDescription:
+                // ontrack se dispara durante setRemoteDescription y necesita
+                // el handler ya instalado para capturar el stream remoto.
+                initMedia(pc, mediaContainer);
+
+                let lastOfferSeq = 0;
+
                 await new Promise(resolve => {
-                    let unsub;
-                    unsub = onValue(ref(db, `rooms/${roomId}/offer`), async snap => {
+                    let resolved = false;
+                    onValue(ref(db, `rooms/${roomId}/offer`), async snap => {
                         if (!snap.exists()) return;
-                        // Diferir la desinscrición: Firebase puede disparar el callback
-                        // sincrónicamente (cache), antes de que `unsub` quede asignado.
-                        queueMicrotask(() => unsub && unsub());
-                        console.log("[Firebase] offer recibido → setRemoteDescription...");
+                        let type, sdp, seq;
                         try {
-                            await pc.setRemoteDescription(snap.val());
+                            ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val()));
+                        } catch (e) { console.warn("[Firebase] no se pudo descifrar offer:", e); return; }
+                        if (seq <= lastOfferSeq) return;
+                        lastOfferSeq = seq;
+                        console.log(`[Firebase] offer descifrado (seq=${seq}) → setRemoteDescription...`);
+                        try {
+                            await pc.setRemoteDescription({ type, sdp });
                             console.log("[SDP] setRemoteDescription(offer) OK");
                             await flushCandidates();
+
+                            const answer    = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+                            console.log("[SDP] setLocalDescription(answer)");
+                            const encAnswer = await encryptVal(roomKey, { type: answer.type, sdp: answer.sdp, seq });
+                            await set(ref(db, `rooms/${roomId}/answer`), encAnswer);
+                            console.log(`[Firebase] answer subido cifrado (seq=${seq})`);
+
+                            if (!resolved) { resolved = true; resolve(); }
                         } catch (e) {
-                            console.error("[SDP] setRemoteDescription(offer) ERROR:", e);
+                            console.error("[SDP] error procesando offer:", e);
                         }
-
-                        const answer = await pc.createAnswer();
-                        await pc.setLocalDescription(answer);
-                        console.log("[SDP] setLocalDescription(answer)");
-
-                        // Trickle ICE: subir el answer de inmediato.
-                        await set(ref(db, `rooms/${roomId}/answer`), answer);
-                        console.log("[Firebase] answer subido");
-                        resolve();
                     });
                 });
             }
@@ -529,6 +574,7 @@
                 if (!roomId) return; // ya salimos de la sala
                 console.log("[reconnect] reiniciando WebRTC...");
                 log("↻ reconectando...");
+                destroyMedia();
                 if (pc) { pc.close(); pc = null; }
                 if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
                 pendingCandidates = [];
@@ -538,6 +584,7 @@
         }
 
         const drawingContainer = document.getElementById("drawing-container");
+        const mediaContainer   = document.getElementById("media-container");
 
         function setupDC() {
             dc.onopen = () => {
@@ -606,21 +653,20 @@
         }
 
         async function leaveRoom() {
+            destroyMedia();
             destroyDrawing();
             if (pc) { pc.close(); pc = null; }
             if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
             if (roomId) {
-                const cleanups = [remove(ref(db, `rooms/${roomId}/presence/${myId}`))];
-                if (isCaller) {
-                    // A limpia el estado de señalización al salir manualmente
-                    cleanups.push(
-                        remove(ref(db, `rooms/${roomId}/callerClaimed`)),
-                        remove(ref(db, `rooms/${roomId}/offer`)),
-                        remove(ref(db, `rooms/${roomId}/answer`)),
-                        remove(ref(db, `rooms/${roomId}/candidates`)),
-                    );
-                }
-                await Promise.all(cleanups);
+                // Siempre limpiar presencia y todo el estado de señalización,
+                // sin importar si somos A o B, para que el próximo usuario entre limpio.
+                await Promise.all([
+                    remove(ref(db, `rooms/${roomId}/presence/${myId}`)),
+                    remove(ref(db, `rooms/${roomId}/callerClaimed`)),
+                    remove(ref(db, `rooms/${roomId}/offer`)),
+                    remove(ref(db, `rooms/${roomId}/answer`)),
+                    remove(ref(db, `rooms/${roomId}/candidates`)),
+                ]);
             }
             roomId = null;
             isCaller = false;
