@@ -124,11 +124,17 @@ export class RTCConnection {
             },
         );
 
-        let lastOfferSeq = 0;
-        this.clientOfferUnsub = this.firebase.watchOffer(this.roomId, this.myId, async ({ type, sdp, seq = 1 }) => {
-            if (seq <= lastOfferSeq) return;
-            lastOfferSeq = seq;
-            console.log(`[Firebase] offer descifrado (seq=${seq}) -> setRemoteDescription...`);
+        let lastOfferId = null;
+        let lastLegacyOfferSeq = 0;
+        this.clientOfferUnsub = this.firebase.watchOffer(this.roomId, this.myId, async ({ type, sdp, seq = 1, offerId }) => {
+            if (offerId) {
+                if (offerId === lastOfferId) return;
+                lastOfferId = offerId;
+            } else {
+                if (seq <= lastLegacyOfferSeq) return;
+                lastLegacyOfferSeq = seq;
+            }
+            console.log(`[Firebase] offer descifrado (seq=${seq}, offerId=${offerId ?? "legacy"}) -> setRemoteDescription...`);
             try {
                 await this.clientPc.setRemoteDescription({ type, sdp });
                 console.log("[SDP] setRemoteDescription(offer) OK");
@@ -145,8 +151,9 @@ export class RTCConnection {
                     type: answer.type,
                     sdp: answer.sdp,
                     seq,
+                    offerId,
                 });
-                console.log(`[Firebase] answer subido cifrado (seq=${seq})`);
+                console.log(`[Firebase] answer subido cifrado (seq=${seq}, offerId=${offerId ?? "legacy"})`);
             } catch (e) {
                 console.error("[SDP] error procesando offer:", e);
             }
@@ -224,33 +231,50 @@ export class RTCConnection {
         }
 
         let negotiationSeq = 0;
-        let lastAnswerSeq = 0;
+        let currentOfferId = null;
+        let lastAnswerOfferId = null;
 
         peerPc.onnegotiationneeded = async () => {
             if (peerPc.signalingState !== "stable") return;
             negotiationSeq++;
             const seq = negotiationSeq;
-            console.log(`[SDP:${clientId}] onnegotiationneeded (seq=${seq})`);
+            const offerId = `${this.myId}-${clientId}-${seq}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+            currentOfferId = offerId;
+            console.log(`[SDP:${clientId}] onnegotiationneeded (seq=${seq}, offerId=${offerId})`);
             try {
                 const offer = await peerPc.createOffer();
                 await peerPc.setLocalDescription(offer);
+                await this.firebase.clearAnswer(this.roomId, clientId);
                 await this.firebase.sendOffer(this.roomId, clientId, {
                     type: offer.type,
                     sdp: offer.sdp,
                     seq,
+                    offerId,
                 });
-                console.log(`[Firebase] offer subido para ${clientId} (seq=${seq})`);
+                console.log(`[Firebase] offer subido para ${clientId} (seq=${seq}, offerId=${offerId})`);
             } catch (e) {
+                if (currentOfferId === offerId) currentOfferId = null;
                 console.error(`[SDP:${clientId}] onnegotiationneeded error:`, e);
             }
         };
 
-        peer.answerUnsub = this.firebase.watchAnswer(this.roomId, clientId, async ({ type, sdp, seq = 1 }) => {
-            if (seq <= lastAnswerSeq) return;
-            lastAnswerSeq = seq;
-            console.log(`[Firebase] answer de ${clientId} (seq=${seq}) -> setRemoteDescription...`);
+        peer.answerUnsub = this.firebase.watchAnswer(this.roomId, clientId, async ({ type, sdp, seq = 1, offerId }) => {
+            if (!offerId || offerId !== currentOfferId) {
+                console.warn(
+                    `[Firebase] answer ignorado de ${clientId}: offerId=${offerId ?? "legacy"} esperado=${currentOfferId ?? "none"}`,
+                );
+                return;
+            }
+            if (offerId === lastAnswerOfferId) return;
+            if (peerPc.signalingState !== "have-local-offer") {
+                console.warn(`[SDP:${clientId}] answer ignorado en estado ${peerPc.signalingState} (offerId=${offerId})`);
+                return;
+            }
+            console.log(`[Firebase] answer de ${clientId} (seq=${seq}, offerId=${offerId}) -> setRemoteDescription...`);
             try {
                 await peerPc.setRemoteDescription({ type, sdp });
+                lastAnswerOfferId = offerId;
+                currentOfferId = null;
                 console.log(`[SDP:${clientId}] setRemoteDescription(answer) OK`);
                 this.flushPeerCandidates(peerPc, peer.pendingCandidates);
             } catch (e) {

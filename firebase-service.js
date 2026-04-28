@@ -179,6 +179,10 @@ export class FirebaseSignaling {
         return set(ref(this.db, `rooms/${roomId}/connections/${clientId}/answer`), enc);
     }
 
+    async clearAnswer(roomId, clientId) {
+        return remove(ref(this.db, `rooms/${roomId}/connections/${clientId}/answer`));
+    }
+
     watchAnswer(roomId, clientId, onAnswer) {
         return onValue(ref(this.db, `rooms/${roomId}/connections/${clientId}/answer`), async snap => {
             if (!snap.exists()) return;
