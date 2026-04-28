@@ -37,6 +37,13 @@ const MAX_SPEED = 420;
 /** Inset from each arena edge so the emoji character never clips the border. */
 const EDGE_PAD = 22;
 
+/**
+ * Collision radius of every player circle (px).
+ * Physics property — the renderer imports this same value so the visual
+ * circle and the collision circle can never drift apart.
+ */
+export const PLAYER_RADIUS = 16;
+
 // ─── Color palette ────────────────────────────────────────────────────────────
 
 /**
@@ -206,4 +213,156 @@ export class Player {
     POS_X[id] = Math.max(EDGE_PAD, Math.min(arenaW - EDGE_PAD, POS_X[id]));
     POS_Y[id] = Math.max(EDGE_PAD, Math.min(arenaH - EDGE_PAD, POS_Y[id]));
   }
+}
+
+// ─── Circle-vs-circle collisions ─────────────────────────────────────────────
+//
+// Two helpers operate directly on the SoA arrays:
+//
+//   resolveCollisions(ids, w, h)
+//     Authoritative pass used by the host. All unique pairs are tested; on
+//     overlap each entity is pushed half the penetration along the contact
+//     normal and the normal components of their velocities are swapped
+//     (equal-mass elastic collision).
+//
+//   resolveOwnCollision(myId, otherIds, w, h)
+//     Used by the client for its predicted entity. Other players are treated
+//     as immovable obstacles (they're dead-reckoned, not simulated locally),
+//     so only my entity is pushed out and any approaching velocity component
+//     against the obstacle is zeroed.
+//
+// Both helpers re-clamp positions to the arena bounds after resolution so a
+// collision can never push an entity past EDGE_PAD.
+
+/** Squared minimum centre-to-centre distance for two non-overlapping circles. */
+const _MIN_DIST_SQ = (2 * PLAYER_RADIUS) * (2 * PLAYER_RADIUS);
+
+/**
+ * Resolve a single overlapping pair authoritatively (used by the host).
+ * Both entities move (half each) and exchange their normal velocity component.
+ *
+ * @param {number} a - Entity ID A.
+ * @param {number} b - Entity ID B.
+ */
+function _resolvePairElastic(a, b) {
+  const dx = POS_X[b] - POS_X[a];
+  const dy = POS_Y[b] - POS_Y[a];
+  const d2 = dx * dx + dy * dy;
+
+  if (d2 >= _MIN_DIST_SQ) return;
+
+  // Degenerate: exact same position — nudge B by an arbitrary small offset
+  // so we have a valid normal direction.
+  let dist, nx, ny;
+  if (d2 === 0) {
+    dist = 0;
+    nx = 1;
+    ny = 0;
+  } else {
+    dist = Math.sqrt(d2);
+    nx = dx / dist;
+    ny = dy / dist;
+  }
+
+  // Positional correction — push each circle out by half the overlap.
+  const overlap = 2 * PLAYER_RADIUS - dist;
+  const half    = overlap * 0.5;
+  POS_X[a] -= nx * half;
+  POS_Y[a] -= ny * half;
+  POS_X[b] += nx * half;
+  POS_Y[b] += ny * half;
+
+  // Velocity exchange along the contact normal (equal mass, elastic).
+  // Only resolve if the pair is approaching; otherwise they're already
+  // separating and an exchange would re-introduce an inward velocity.
+  const vAn = VEL_X[a] * nx + VEL_Y[a] * ny;
+  const vBn = VEL_X[b] * nx + VEL_Y[b] * ny;
+  const dv  = vBn - vAn;
+  if (dv >= 0) return; // separating or sliding → done
+
+  VEL_X[a] += dv * nx;
+  VEL_Y[a] += dv * ny;
+  VEL_X[b] -= dv * nx;
+  VEL_Y[b] -= dv * ny;
+}
+
+/**
+ * Authoritative all-pairs collision pass. Mutates POS_* and VEL_* in-place.
+ * Iteration order is deterministic (i < j ascending) so the host produces
+ * the same result every frame for the same input state.
+ *
+ * @param {number[]} ids    - Active entity IDs to consider.
+ * @param {number}   arenaW - Arena width  (px) for re-clamping after resolution.
+ * @param {number}   arenaH - Arena height (px).
+ */
+export function resolveCollisions(ids, arenaW, arenaH) {
+  const n = ids.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      _resolvePairElastic(ids[i], ids[j]);
+    }
+  }
+  // A collision push may have moved a circle past the arena clamp the
+  // per-entity update() applied moments earlier — re-clamp now.
+  for (let k = 0; k < n; k++) {
+    const id = ids[k];
+    POS_X[id] = Math.max(EDGE_PAD, Math.min(arenaW - EDGE_PAD, POS_X[id]));
+    POS_Y[id] = Math.max(EDGE_PAD, Math.min(arenaH - EDGE_PAD, POS_Y[id]));
+  }
+}
+
+/**
+ * Client-side single-entity collision pass.
+ *
+ * Treats every entity in `otherIds` as an immovable circular obstacle and
+ * resolves only `myId`:
+ *   • position is pushed out by the full penetration along the contact normal
+ *   • the inward (approaching) component of my velocity is removed
+ *
+ * The host stays authoritative — this exists purely so the local prediction
+ * for the player's own circle doesn't visibly clip through other players
+ * between authoritative snapshots.
+ *
+ * @param {number}   myId     - My entity ID.
+ * @param {number[]} otherIds - All other live entity IDs.
+ * @param {number}   arenaW
+ * @param {number}   arenaH
+ */
+export function resolveOwnCollision(myId, otherIds, arenaW, arenaH) {
+  for (let k = 0; k < otherIds.length; k++) {
+    const o = otherIds[k];
+
+    // Normal points from the other entity towards me — the direction I get
+    // pushed when we overlap.
+    const dx = POS_X[myId] - POS_X[o];
+    const dy = POS_Y[myId] - POS_Y[o];
+    const d2 = dx * dx + dy * dy;
+    if (d2 >= _MIN_DIST_SQ) continue;
+
+    let dist, nx, ny;
+    if (d2 === 0) {
+      dist = 0;
+      nx = 1;
+      ny = 0;
+    } else {
+      dist = Math.sqrt(d2);
+      nx = dx / dist;
+      ny = dy / dist;
+    }
+
+    const overlap = 2 * PLAYER_RADIUS - dist;
+    POS_X[myId] += nx * overlap;
+    POS_Y[myId] += ny * overlap;
+
+    // Zero the component of my velocity that points back into the obstacle.
+    // Approaching ⇔ vAn < 0  (because n points from obstacle to me).
+    const vAn = VEL_X[myId] * nx + VEL_Y[myId] * ny;
+    if (vAn < 0) {
+      VEL_X[myId] -= vAn * nx;
+      VEL_Y[myId] -= vAn * ny;
+    }
+  }
+
+  POS_X[myId] = Math.max(EDGE_PAD, Math.min(arenaW - EDGE_PAD, POS_X[myId]));
+  POS_Y[myId] = Math.max(EDGE_PAD, Math.min(arenaH - EDGE_PAD, POS_Y[myId]));
 }

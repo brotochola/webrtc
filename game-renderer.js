@@ -9,14 +9,11 @@
  * renderer works for any number of players (2…MAX_ENTITIES).
  */
 
-import { PLAYER_COLORS } from './game-physics.js';
+import { PLAYER_COLORS, PLAYER_RADIUS } from './game-physics.js';
 
 /** Logical arena dimensions (CSS pixels at 1× DPR). */
 export const ARENA_W = 600;
 export const ARENA_H = 380;
-
-/** Radius of each player circle (px). */
-const PLAYER_RADIUS = 16;
 
 /** Faint grid line spacing (px). */
 const GRID_STEP = 40;

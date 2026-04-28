@@ -24,7 +24,7 @@
  * 1-byte setup packet before the first broadcast arrives.
  */
 
-import { Player, PLAYER_COLORS, MAX_ENTITIES } from './game-physics.js';
+import { Player, PLAYER_COLORS, MAX_ENTITIES, resolveOwnCollision } from './game-physics.js';
 import { InputHandler }     from './game-input.js';
 import { ARENA_W, ARENA_H } from './game-renderer.js';
 
@@ -102,6 +102,14 @@ export class GameClient {
         this._rafId    = null;
         this._lastTime = 0;
 
+        /**
+         * Scratch buffer of "other" entity IDs reused by resolveOwnCollision()
+         * every frame to avoid per-frame allocation. Length is set explicitly
+         * before the call; trailing slots may contain stale values.
+         * @type {number[]}
+         */
+        this._otherIds = [];
+
         // Register the message handler before the first frame.
         this._onMessage = this._handleMessage.bind(this);
         this._dc.addEventListener('message', this._onMessage);
@@ -127,28 +135,63 @@ export class GameClient {
     // ─── Private ─────────────────────────────────────────────────────────────
 
     /**
-     * Main rAF loop — prediction, reconciliation, dead reckoning, render.
+     * Main rAF loop. Three ordered passes per frame:
+     *
+     *   Pass A — dead-reckon every other player into its display slot, so the
+     *            local prediction in pass B can collide against fresh
+     *            positions instead of last frame's.
+     *
+     *   Pass B — predict the own player one step, then resolve circle
+     *            collisions against every other player as immovable
+     *            obstacles. The host is still the authority — this only
+     *            keeps the local prediction from clipping through a
+     *            neighbour between snapshots.
+     *
+     *   Pass C — reconcile own predicted position towards the latest
+     *            authoritative snapshot (soft nudge or hard snap).
+     *
      * @param {DOMHighResTimeStamp} now
      */
     _loop(now) {
         const dt = Math.min((now - this._lastTime) / 1000, MAX_DT);
         this._lastTime = now;
 
-        const me = this._myEntityId;
+        const me    = this._myEntityId;
+        const alpha = this._lerpAlpha(dt);
 
+        // ── Pass A: dead-reckon every other player ───────────────────────────
+        let otherCount = 0;
         for (let id = 0; id < MAX_ENTITIES; id++) {
             const player = this._players[id];
-            if (!player) continue;
+            if (!player || id === me) continue;
 
-            if (id === me) {
-                // ── 1. Prediction ────────────────────────────────────────
+            const base   = id * 4;
+            const ageSec = Math.min(
+                (now - this._snapTimeMs[id]) / 1000,
+                this._packetInterval * 2,
+            );
+            const extraX = this._snapPos[base]     + this._snapPos[base + 2] * ageSec;
+            const extraY = this._snapPos[base + 1] + this._snapPos[base + 3] * ageSec;
+
+            player.posX += (extraX - player.posX) * alpha;
+            player.posY += (extraY - player.posY) * alpha;
+
+            this._otherIds[otherCount++] = id;
+        }
+        this._otherIds.length = otherCount;
+
+        // ── Pass B: predict own + resolve collisions against the rest ────────
+        if (me >= 0) {
+            const player = this._players[me];
+            if (player) {
                 player.update(dt, ARENA_W, ARENA_H);
+                resolveOwnCollision(me, this._otherIds, ARENA_W, ARENA_H);
 
-                // ── 2. Reconciliation ────────────────────────────────────
-                const base  = id * 4;
-                const errX  = this._snapPos[base]     - player.posX;
-                const errY  = this._snapPos[base + 1] - player.posY;
-                const err   = Math.hypot(errX, errY);
+                // ── Pass C: reconciliation ───────────────────────────────────
+                const base = me * 4;
+                const errX = this._snapPos[base]     - player.posX;
+                const errY = this._snapPos[base + 1] - player.posY;
+                const err  = Math.hypot(errX, errY);
 
                 if (err >= SNAP_THRESHOLD) {
                     player.posX = this._snapPos[base];
@@ -157,20 +200,6 @@ export class GameClient {
                     player.posX += errX * CORRECTION_ALPHA;
                     player.posY += errY * CORRECTION_ALPHA;
                 }
-
-            } else {
-                // ── 3. Dead reckoning ────────────────────────────────────
-                const base   = id * 4;
-                const ageSec = Math.min(
-                    (now - this._snapTimeMs[id]) / 1000,
-                    this._packetInterval * 2,
-                );
-                const extraX = this._snapPos[base]     + this._snapPos[base + 2] * ageSec;
-                const extraY = this._snapPos[base + 1] + this._snapPos[base + 3] * ageSec;
-
-                const alpha  = this._lerpAlpha(dt);
-                player.posX += (extraX - player.posX) * alpha;
-                player.posY += (extraY - player.posY) * alpha;
             }
         }
 

@@ -15,7 +15,12 @@
  *      channels as clients join and leave.
  */
 
-import { Player, POS_X, POS_Y, VEL_X, VEL_Y, PLAYER_COLORS, MAX_ENTITIES } from './game-physics.js';
+import {
+    Player,
+    POS_X, POS_Y, VEL_X, VEL_Y,
+    PLAYER_COLORS, MAX_ENTITIES,
+    resolveCollisions,
+} from './game-physics.js';
 import { InputHandler } from './game-input.js';
 import { ARENA_W, ARENA_H } from './game-renderer.js';
 
@@ -90,6 +95,13 @@ export class GameHost {
         this._frameCount = 0;
         this._rafId      = null;
         this._lastTime   = 0;
+
+        /**
+         * Reusable scratch buffer of active entity IDs, passed to
+         * resolveCollisions() each frame. Resized only when peers join/leave.
+         * @type {number[]}
+         */
+        this._activeIds = [0];
 
         // Host player is driven by local keyboard.
         this._input = new InputHandler((ax, ay) => {
@@ -206,6 +218,9 @@ export class GameHost {
     _rebuildBroadcastBuffer() {
         const n      = 1 + this._peers.size; // host + all clients
         this._posBuf = new Float32Array(3 + n * 4);
+
+        // Refresh the active-ID list used by the per-frame collision pass.
+        this._activeIds = [0, ...Array.from(this._peers.values()).map(p => p.entityId)];
     }
 
     /** Rebuild the renderer legend to match the current peer count. */
@@ -252,6 +267,11 @@ export class GameHost {
         for (const { player } of this._peers.values()) {
             player.update(dt, ARENA_W, ARENA_H);
         }
+
+        // Authoritative circle-vs-circle collision pass. Mutates POS_*/VEL_*
+        // in place, so the broadcast below already reflects the post-collision
+        // state and clients only have to reconcile / dead-reckon as usual.
+        resolveCollisions(this._activeIds, ARENA_W, ARENA_H);
 
         this._render();
 
