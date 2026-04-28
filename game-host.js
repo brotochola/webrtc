@@ -16,9 +16,9 @@ import { Player, POS_X, POS_Y } from "./game-physics.js";
 import { InputHandler } from "./game-input.js";
 import { ARENA_W, ARENA_H } from "./game-renderer.js";
 
-/** Emoji used to represent each peer. */
-const HOST_EMOJI = "🟦";
-const CLIENT_EMOJI = "🟥";
+/** Fill colours for each player's circle. */
+const HOST_COLOR   = '#3b82f6';   // blue
+const CLIENT_COLOR = '#ef4444';   // red
 
 /**
  * Maximum allowed dt (seconds) passed to Player.update().
@@ -59,8 +59,18 @@ export class GameHost {
     // Spawn both players at the vertical centre, offset left/right so they
     // don't overlap. Entity IDs (0, 1) must match CLIENT_ENTITY_ID constants
     // in game-client.js.
-    this._hostPlayer   = new Player(0, HOST_EMOJI,   ARENA_W / 2 - SPAWN_OFFSET, ARENA_H / 2);
-    this._clientPlayer = new Player(1, CLIENT_EMOJI, ARENA_W / 2 + SPAWN_OFFSET, ARENA_H / 2);
+    this._hostPlayer = new Player(
+      0,
+      HOST_COLOR,
+      ARENA_W / 2 - SPAWN_OFFSET,
+      ARENA_H / 2,
+    );
+    this._clientPlayer = new Player(
+      1,
+      CLIENT_COLOR,
+      ARENA_W / 2 + SPAWN_OFFSET,
+      ARENA_H / 2,
+    );
 
     /**
      * Persistent send buffer — never reallocated after construction.
@@ -102,7 +112,7 @@ export class GameHost {
    */
   start() {
     this._lastTime = performance.now();
-    this._rafId    = requestAnimationFrame(this._loop.bind(this));
+    this._rafId = requestAnimationFrame(this._loop.bind(this));
   }
 
   /**
@@ -194,7 +204,6 @@ export class GameHost {
    * @private
    */
   _handleClientMessage(e) {
-    console.log(e);
     if (!(e.data instanceof ArrayBuffer)) return;
 
     const input = new Int8Array(e.data);

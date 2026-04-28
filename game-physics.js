@@ -22,20 +22,20 @@
 // ─── Physics constants ────────────────────────────────────────────────────────
 
 /** Acceleration applied while a direction key is held (px / s²). */
-const ACCEL     = 900;
+const ACCEL = 1900;
 
 /**
  * Per-frame velocity damping multiplier.
  * Applied as: vel *= FRICTION each integration step.
  * 0 = instant stop, 1 = no damping. Tuned for ~60 fps.
  */
-const FRICTION  = 0.88;
+const FRICTION = 0.97;
 
 /** Absolute velocity ceiling (px / s). Both axes are scaled together. */
 const MAX_SPEED = 420;
 
 /** Inset from each arena edge so the emoji character never clips the border. */
-const EDGE_PAD  = 22;
+const EDGE_PAD = 22;
 
 // ─── SoA buffers (module-level, allocated once) ───────────────────────────────
 
@@ -62,102 +62,129 @@ export const ACC_Y = new Float32Array(MAX_ENTITIES);
  * when filling the broadcast buffer — that is intentional and idiomatic ECS.
  */
 export class Player {
-    /**
-     * @param {number} id      - Entity ID: index into every SoA array.
-     * @param {string} emoji   - Emoji character rendered on the canvas.
-     * @param {number} startX  - Initial X position (px).
-     * @param {number} startY  - Initial Y position (px).
-     */
-    constructor(id, emoji, startX, startY) {
-        /** @type {number} Entity ID — the only piece of state stored on the object. */
-        this.id    = id;
-        /** @type {string} */
-        this.emoji = emoji;
+  /**
+   * @param {number} id      - Entity ID: index into every SoA array.
+   * @param {string} color   - CSS colour string used by the renderer (e.g. '#3b82f6').
+   * @param {number} startX  - Initial X position (px).
+   * @param {number} startY  - Initial Y position (px).
+   */
+  constructor(id, color, startX, startY) {
+    /** @type {number} Entity ID — the only piece of state stored on the object. */
+    this.id = id;
+    /** @type {string} CSS colour string forwarded to the renderer. */
+    this.color = color;
 
-        // Initialise this entity's slot in every SoA array.
-        POS_X[id] = startX;  POS_Y[id] = startY;
-        VEL_X[id] = 0;       VEL_Y[id] = 0;
-        ACC_X[id] = 0;       ACC_Y[id] = 0;
+    // Initialise this entity's slot in every SoA array.
+    POS_X[id] = startX;
+    POS_Y[id] = startY;
+    VEL_X[id] = 0;
+    VEL_Y[id] = 0;
+    ACC_X[id] = 0;
+    ACC_Y[id] = 0;
+  }
+
+  // ─── Position ─────────────────────────────────────────────────────────────
+
+  get posX() {
+    return POS_X[this.id];
+  }
+  set posX(v) {
+    POS_X[this.id] = v;
+  }
+
+  get posY() {
+    return POS_Y[this.id];
+  }
+  set posY(v) {
+    POS_Y[this.id] = v;
+  }
+
+  // ─── Velocity ─────────────────────────────────────────────────────────────
+
+  get velX() {
+    return VEL_X[this.id];
+  }
+  set velX(v) {
+    VEL_X[this.id] = v;
+  }
+
+  get velY() {
+    return VEL_Y[this.id];
+  }
+  set velY(v) {
+    VEL_Y[this.id] = v;
+  }
+
+  // ─── Acceleration ─────────────────────────────────────────────────────────
+
+  get accX() {
+    return ACC_X[this.id];
+  }
+  set accX(v) {
+    ACC_X[this.id] = v;
+  }
+
+  get accY() {
+    return ACC_Y[this.id];
+  }
+  set accY(v) {
+    ACC_Y[this.id] = v;
+  }
+
+  // ─── Input ────────────────────────────────────────────────────────────────
+
+  /**
+   * Convert a directional input into acceleration for the next frame.
+   * Called by the host for its own player (InputHandler callback) and for
+   * the remote client player (decoded from incoming Int8Array packets).
+   *
+   * @param {number} ax - Horizontal: -1 (left), 0, +1 (right).
+   * @param {number} ay - Vertical:   -1 (up),   0, +1 (down).
+   */
+  setInput(ax, ay) {
+    ACC_X[this.id] = ax * ACCEL;
+    ACC_Y[this.id] = ay * ACCEL;
+  }
+
+  // ─── Physics step ─────────────────────────────────────────────────────────
+
+  /**
+   * Advance this entity's physics by one frame (semi-implicit Euler).
+   *
+   *   1. vel += acc · dt          (acceleration impulse)
+   *   2. vel *= FRICTION           (exponential drag)
+   *   3. |vel| clamped to MAX_SPEED
+   *   4. pos += vel · dt          (position integration)
+   *   5. pos clamped to arena bounds ± EDGE_PAD
+   *
+   * All reads and writes go through the SoA arrays via the entity ID,
+   * so no heap allocation occurs inside this method.
+   *
+   * @param {number} dt      - Frame delta-time (s). Caller caps this to ≤ 0.1.
+   * @param {number} arenaW  - Arena width  (px), from GameRenderer.ARENA_W.
+   * @param {number} arenaH  - Arena height (px), from GameRenderer.ARENA_H.
+   */
+  update(dt, arenaW, arenaH) {
+    const id = this.id;
+
+    // 1 + 2 — velocity with friction
+    VEL_X[id] = (VEL_X[id] + ACC_X[id] * dt) * FRICTION;
+    VEL_Y[id] = (VEL_Y[id] + ACC_Y[id] * dt) * FRICTION;
+
+    // 3 — speed cap (scales both axes proportionally)
+    const speed = Math.hypot(VEL_X[id], VEL_Y[id]);
+    if (speed > MAX_SPEED) {
+      const inv = MAX_SPEED / speed;
+      VEL_X[id] *= inv;
+      VEL_Y[id] *= inv;
     }
 
-    // ─── Position ─────────────────────────────────────────────────────────────
+    // 4 — integrate position
+    POS_X[id] += VEL_X[id] * dt;
+    POS_Y[id] += VEL_Y[id] * dt;
 
-    get posX() { return POS_X[this.id]; }
-    set posX(v) { POS_X[this.id] = v;  }
-
-    get posY() { return POS_Y[this.id]; }
-    set posY(v) { POS_Y[this.id] = v;  }
-
-    // ─── Velocity ─────────────────────────────────────────────────────────────
-
-    get velX() { return VEL_X[this.id]; }
-    set velX(v) { VEL_X[this.id] = v;  }
-
-    get velY() { return VEL_Y[this.id]; }
-    set velY(v) { VEL_Y[this.id] = v;  }
-
-    // ─── Acceleration ─────────────────────────────────────────────────────────
-
-    get accX() { return ACC_X[this.id]; }
-    set accX(v) { ACC_X[this.id] = v;  }
-
-    get accY() { return ACC_Y[this.id]; }
-    set accY(v) { ACC_Y[this.id] = v;  }
-
-    // ─── Input ────────────────────────────────────────────────────────────────
-
-    /**
-     * Convert a directional input into acceleration for the next frame.
-     * Called by the host for its own player (InputHandler callback) and for
-     * the remote client player (decoded from incoming Int8Array packets).
-     *
-     * @param {number} ax - Horizontal: -1 (left), 0, +1 (right).
-     * @param {number} ay - Vertical:   -1 (up),   0, +1 (down).
-     */
-    setInput(ax, ay) {
-        ACC_X[this.id] = ax * ACCEL;
-        ACC_Y[this.id] = ay * ACCEL;
-    }
-
-    // ─── Physics step ─────────────────────────────────────────────────────────
-
-    /**
-     * Advance this entity's physics by one frame (semi-implicit Euler).
-     *
-     *   1. vel += acc · dt          (acceleration impulse)
-     *   2. vel *= FRICTION           (exponential drag)
-     *   3. |vel| clamped to MAX_SPEED
-     *   4. pos += vel · dt          (position integration)
-     *   5. pos clamped to arena bounds ± EDGE_PAD
-     *
-     * All reads and writes go through the SoA arrays via the entity ID,
-     * so no heap allocation occurs inside this method.
-     *
-     * @param {number} dt      - Frame delta-time (s). Caller caps this to ≤ 0.1.
-     * @param {number} arenaW  - Arena width  (px), from GameRenderer.ARENA_W.
-     * @param {number} arenaH  - Arena height (px), from GameRenderer.ARENA_H.
-     */
-    update(dt, arenaW, arenaH) {
-        const id = this.id;
-
-        // 1 + 2 — velocity with friction
-        VEL_X[id] = (VEL_X[id] + ACC_X[id] * dt) * FRICTION;
-        VEL_Y[id] = (VEL_Y[id] + ACC_Y[id] * dt) * FRICTION;
-
-        // 3 — speed cap (scales both axes proportionally)
-        const speed = Math.hypot(VEL_X[id], VEL_Y[id]);
-        if (speed > MAX_SPEED) {
-            const inv = MAX_SPEED / speed;
-            VEL_X[id] *= inv;
-            VEL_Y[id] *= inv;
-        }
-
-        // 4 — integrate position
-        POS_X[id] += VEL_X[id] * dt;
-        POS_Y[id] += VEL_Y[id] * dt;
-
-        // 5 — boundary clamp
-        POS_X[id] = Math.max(EDGE_PAD, Math.min(arenaW - EDGE_PAD, POS_X[id]));
-        POS_Y[id] = Math.max(EDGE_PAD, Math.min(arenaH - EDGE_PAD, POS_Y[id]));
-    }
+    // 5 — boundary clamp
+    POS_X[id] = Math.max(EDGE_PAD, Math.min(arenaW - EDGE_PAD, POS_X[id]));
+    POS_Y[id] = Math.max(EDGE_PAD, Math.min(arenaH - EDGE_PAD, POS_Y[id]));
+  }
 }

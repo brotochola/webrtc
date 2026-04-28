@@ -559,6 +559,9 @@ button.action.active:hover {
     gap: 5px;
 }
 
+.game-legend-host   { color: #3b82f6; }
+.game-legend-client { color: #ef4444; }
+
 /* ── Drawing module ───────────────────────────────────────────────────── */
 .drawing-wrap {
     display: flex;

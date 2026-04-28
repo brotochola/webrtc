@@ -10,8 +10,8 @@
 export const ARENA_W = 600;
 export const ARENA_H = 380;
 
-/** Font size used to render emoji characters. */
-const EMOJI_SIZE = 34;
+/** Radius of each player circle (px). */
+const PLAYER_RADIUS = 16;
 
 /**
  * Faint grid line spacing (px).
@@ -51,8 +51,8 @@ export class GameRenderer {
                 </div>
                 <canvas class="game-canvas" width="${ARENA_W}" height="${ARENA_H}"></canvas>
                 <div class="game-panel-legend">
-                    <span class="game-legend-host">🟦 Host</span>
-                    <span class="game-legend-client">🟥 Cliente</span>
+                    <span class="game-legend-host">&#9679; Host</span>
+                    <span class="game-legend-client">&#9679; Cliente</span>
                 </div>
             </div>`;
 
@@ -111,30 +111,16 @@ export class GameRenderer {
     }
 
     /**
-     * Renders one player's emoji at their current position.
-     * A small semi-transparent shadow disc underneath gives a sense of depth.
+     * Renders one player as a filled circle.
      *
-     * Reads posX / posY via the SoA getters on Player (or any duck-typed
-     * object that exposes those two numeric properties).
-     *
-     * @param {{ emoji: string, posX: number, posY: number }} player
+     * @param {{ color: string, posX: number, posY: number }} player
      */
     _drawPlayer(player) {
         const ctx = this._ctx;
-        const x = player.posX;
-        const y = player.posY;
-
-        // Shadow disc
         ctx.beginPath();
-        ctx.arc(x, y + 4, 16, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.arc(player.posX, player.posY, PLAYER_RADIUS, 0, Math.PI * 2);
+        ctx.fillStyle = player.color;
         ctx.fill();
-
-        // Emoji
-        ctx.font        = `${EMOJI_SIZE}px serif`;
-        ctx.textAlign   = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(player.emoji, x, y);
     }
 
     // ─── Public API ──────────────────────────────────────────────────────────
@@ -143,8 +129,8 @@ export class GameRenderer {
      * Clear the canvas and redraw both players.
      * Safe to call at any frequency; no internal state is mutated.
      *
-     * @param {{ emoji: string, posX: number, posY: number }} hostPlayer
-     * @param {{ emoji: string, posX: number, posY: number }} clientPlayer
+     * @param {{ color: string, posX: number, posY: number }} hostPlayer
+     * @param {{ color: string, posX: number, posY: number }} clientPlayer
      */
     render(hostPlayer, clientPlayer) {
         this._drawBackground();
