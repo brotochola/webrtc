@@ -23,7 +23,7 @@ const MSG_DRAW_END   = 0x04;
 const MSG_CLEAR      = 0x05;
 
 // ── Estado global del módulo ──────────────────────────────────────────────
-let drawCanvas, cursorCanvas, drawCtx, cursorCtx;
+let wrapper, drawCanvas, cursorCanvas, drawCtx, cursorCtx;
 let dc;
 let rafId     = null;
 let listeners = [];   // para cleanup: [[el, event, fn], ...]
@@ -49,7 +49,7 @@ export function initDrawing(dataChannel, containerEl) {
     dc.binaryType = "arraybuffer";
 
     // Wrapper total
-    const wrapper = document.createElement("div");
+    wrapper = document.createElement("div");
     wrapper.className = "drawing-wrap";
 
     // ── Toolbar ──
@@ -137,6 +137,7 @@ export function destroyDrawing() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     listeners.forEach(([el, ev, fn, opts]) => el.removeEventListener(ev, fn, opts));
     listeners = [];
+    wrapper?.remove();      wrapper      = null;
     drawCanvas?.remove();   drawCanvas   = null; drawCtx   = null;
     cursorCanvas?.remove(); cursorCanvas = null; cursorCtx = null;
     dc = null;

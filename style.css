@@ -327,6 +327,81 @@ button.action.secondary:hover {
     box-shadow: 0 0 8px var(--green-glow);
 }
 
+/* ── App modules ─────────────────────────────────────────────────────── */
+.app-module {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.app-module-header {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border: none;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+    transition: background var(--transition);
+}
+
+.app-module-header:hover {
+    background: var(--surface-2);
+}
+
+.app-module-title,
+.app-module-subtitle {
+    display: block;
+}
+
+.app-module-title {
+    font-size: 0.88rem;
+    font-weight: 650;
+    color: #fff;
+}
+
+.app-module-subtitle {
+    margin-top: 2px;
+    font-size: 0.72rem;
+    color: var(--text-muted);
+}
+
+.app-module-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+    white-space: nowrap;
+}
+
+.app-module-chevron {
+    display: inline-block;
+    font-size: 1rem;
+    transition: transform var(--transition);
+}
+
+.app-module.is-collapsed .app-module-chevron {
+    transform: rotate(-90deg);
+}
+
+.app-module-body {
+    border-top: 1px solid var(--border);
+    padding: 12px;
+}
+
+.chat-module-body {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
 /* Media & Drawing containers */
 #media-container {
     border-radius: var(--radius-md);
@@ -735,6 +810,19 @@ canvas.drawing-cursor {
     button.action {
         padding: 9px 13px;
         font-size: 0.825rem;
+    }
+
+    .app-module-header {
+        padding: 11px 12px;
+        align-items: flex-start;
+    }
+
+    .app-module-toggle-text {
+        display: none;
+    }
+
+    .app-module-body {
+        padding: 10px;
     }
 
     /* Log más compacto en mobile */

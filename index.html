@@ -35,665 +35,79 @@
             <button class="action secondary" id="btn-leave">← Salir</button>
         </div>
 
-        <!-- Controles de cámara/micrófono y video (media.js) -->
-        <div id="media-container"></div>
+        <section class="app-module" data-module="game">
+            <button class="app-module-header" type="button" aria-expanded="true" aria-controls="game-module-body">
+                <span>
+                    <span class="app-module-title">Juego</span>
+                    <span class="app-module-subtitle">Arena multijugador</span>
+                </span>
+                <span class="app-module-toggle">
+                    <span class="app-module-toggle-text">Ocultar</span>
+                    <span class="app-module-chevron">⌄</span>
+                </span>
+            </button>
+            <div class="app-module-body" id="game-module-body">
+                <div id="game-container"></div>
+            </div>
+        </section>
 
-        <!-- Canvas de dibujo colaborativo -->
-        <div id="drawing-container"></div>
+        <section class="app-module" data-module="chat">
+            <button class="app-module-header" type="button" aria-expanded="true" aria-controls="chat-module-body">
+                <span>
+                    <span class="app-module-title">Chat</span>
+                    <span class="app-module-subtitle">Mensajes del canal</span>
+                </span>
+                <span class="app-module-toggle">
+                    <span class="app-module-toggle-text">Ocultar</span>
+                    <span class="app-module-chevron">⌄</span>
+                </span>
+            </button>
+            <div class="app-module-body chat-module-body" id="chat-module-body">
+                <pre id="log"></pre>
+                <div class="send-row">
+                    <input id="msg" placeholder="Escribí un mensaje…">
+                    <button class="action" id="btn-send">Enviar</button>
+                </div>
+            </div>
+        </section>
 
-        <!-- Panel del juego multijugador -->
-        <div id="game-container"></div>
+        <section class="app-module" data-module="camera">
+            <button class="app-module-header" type="button" aria-expanded="true" aria-controls="media-module-body">
+                <span>
+                    <span class="app-module-title">Cámara</span>
+                    <span class="app-module-subtitle">Video y micrófono</span>
+                </span>
+                <span class="app-module-toggle">
+                    <span class="app-module-toggle-text">Ocultar</span>
+                    <span class="app-module-chevron">⌄</span>
+                </span>
+            </button>
+            <div class="app-module-body" id="media-module-body">
+                <div id="media-container"></div>
+            </div>
+        </section>
 
-        <pre id="log"></pre>
-        <div class="send-row">
-            <input id="msg" placeholder="Escribí un mensaje…">
-            <button class="action" id="btn-send">Enviar</button>
-        </div>
+        <section class="app-module" data-module="drawing">
+            <button class="app-module-header" type="button" aria-expanded="true" aria-controls="drawing-module-body">
+                <span>
+                    <span class="app-module-title">Dibujo</span>
+                    <span class="app-module-subtitle">Canvas colaborativo</span>
+                </span>
+                <span class="app-module-toggle">
+                    <span class="app-module-toggle-text">Ocultar</span>
+                    <span class="app-module-chevron">⌄</span>
+                </span>
+            </button>
+            <div class="app-module-body" id="drawing-module-body">
+                <div id="drawing-container"></div>
+            </div>
+        </section>
     </div>
 
-    <!-- ICE servers list (expone global `iceServers`) -->
-    <script src="iceServers.js"></script>
-
     <script type="module">
-        import { initDrawing, destroyDrawing } from "./drawing.js";
-        import { initMedia, destroyMedia }     from "./media.js";
-        import {
-            initGameHost, initGameClient,
-            addGamePeer,  removeGamePeer,
-            destroyGame,
-        } from "./game.js";
-        import { deriveRoomKey, encryptVal, decryptVal } from "./crypto-utils.js";
-        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-        import {
-            getDatabase, ref, set, update, push, remove, get,
-            onChildAdded, onChildRemoved, onValue, runTransaction, onDisconnect
-        } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+        import { App } from "./app.js";
 
-        const firebaseConfig = {
-            apiKey: "AIzaSyA2PW7pAnTSrutVDYabtwL7Q3JB2Mir3Pw",
-            authDomain: "webrtc-5c119.firebaseapp.com",
-            databaseURL: "https://webrtc-5c119-default-rtdb.firebaseio.com",
-            projectId: "webrtc-5c119",
-            storageBucket: "webrtc-5c119.firebasestorage.app",
-            messagingSenderId: "334466186648",
-            appId: "1:334466186648:web:10429db094bf249c203fed"
-        };
-
-        const app = initializeApp(firebaseConfig);
-        const db = getDatabase(app);
-
-        // ID único para esta sesión
-        const myId = Math.random().toString(36).slice(2);
-        console.log("[init] myId:", myId);
-
-        // ── UI refs ──────────────────────────────────────────────────
-        const lobbyEl        = document.getElementById("lobby");
-        const roomViewEl     = document.getElementById("room-view");
-        const channelsListEl = document.getElementById("channels-list");
-        const channelInput   = document.getElementById("channel-input");
-        const roomTitleEl    = document.getElementById("room-title");
-        const statusEl       = document.getElementById("room-status");
-        const logEl          = document.getElementById("log");
-        const msgInput       = document.getElementById("msg");
-        const drawingContainer = document.getElementById("drawing-container");
-        const mediaContainer   = document.getElementById("media-container");
-        const gameContainer    = document.getElementById("game-container");
-
-        // ── State ────────────────────────────────────────────────────
-        let roomId, roomKey, isCaller;
-        let reconnectTimer = null;
-
-        /**
-         * Host-only: one entry per connected client.
-         * key   = clientId (Firebase presence key)
-         * value = { pc, dc, gameDc, pendingCandidates, candidatesUnsub }
-         * @type {Map<string, object>}
-         */
-        const peerMap = new Map();
-
-        /** Firebase onChildAdded unsub for watching presence (host only). */
-        let presenceAddedUnsub  = null;
-        /** Firebase onChildRemoved unsub for watching presence (host only). */
-        let presenceRemovedUnsub = null;
-
-        /**
-         * Primary chat DC used by the UI's send() / setupDC().
-         * Host: set to the first peer's chat channel.
-         * Client: set to the single connection's chat channel.
-         */
-        let dc = null;
-
-        // Client-only single connection state.
-        let clientPc               = null;
-        let clientGameDc           = null;
-        let clientPendingCandidates = [];
-        let clientCandidatesUnsub  = null;
-
-        const TEN_MIN = 10 * 60 * 1000;
-
-        // ── Limpieza de canales viejos ────────────────────────────────
-        async function cleanupOldRooms() {
-            const snap = await get(ref(db, "rooms"));
-            if (!snap.exists()) return;
-            const now = Date.now();
-            const rooms = snap.val();
-            const deletes = [];
-            for (const [name, data] of Object.entries(rooms)) {
-                const lastUse = data?.meta?.last_use ?? data?.meta?.date_created ?? 0;
-                if (now - lastUse > TEN_MIN) {
-                    console.log(`[cleanup] borrando "${name}" — último uso: ${new Date(lastUse).toLocaleTimeString()}`);
-                    deletes.push(remove(ref(db, `rooms/${name}`)));
-                }
-            }
-            if (deletes.length) {
-                await Promise.all(deletes);
-                console.log(`[cleanup] ${deletes.length} canal(es) eliminado(s)`);
-            }
-        }
-
-        // ── Lobby: escuchar canales en tiempo real ───────────────────
-        onValue(ref(db, "rooms"), snap => {
-            const rooms = snap.val() || {};
-            channelsListEl.innerHTML = "";
-
-            const entries = Object.entries(rooms)
-                .filter(([, data]) => data && data.presence);
-
-            if (entries.length === 0) {
-                channelsListEl.innerHTML = '<div class="channels-label">Canales activos</div><div id="no-channels">No hay canales activos aún.</div>';
-                return;
-            }
-
-            channelsListEl.innerHTML = '<div class="channels-label">Canales activos</div>';
-
-            for (const [name, data] of entries) {
-                const count = data.presence ? Object.keys(data.presence).length : 0;
-                const lastUse = data?.meta?.last_use ?? data?.meta?.date_created;
-                const timeStr = lastUse ? timeAgo(lastUse) : "";
-
-                const btn = document.createElement("button");
-                btn.className = "channel-btn";
-
-                const nameSpan = document.createElement("span");
-                nameSpan.className = "channel-name";
-                nameSpan.textContent = name;
-
-                const metaSpan = document.createElement("span");
-                metaSpan.className = "channel-meta";
-
-                const countSpan = document.createElement("span");
-                countSpan.className = "channel-count";
-                countSpan.textContent = `${count} conectado${count !== 1 ? "s" : ""}`;
-                metaSpan.appendChild(countSpan);
-
-                if (timeStr) {
-                    const timeSpan = document.createElement("span");
-                    timeSpan.className = "channel-time";
-                    timeSpan.textContent = timeStr;
-                    metaSpan.appendChild(timeSpan);
-                }
-
-                btn.appendChild(nameSpan);
-                btn.appendChild(metaSpan);
-                btn.addEventListener("click", () => enterRoom(name));
-                channelsListEl.appendChild(btn);
-            }
-        });
-
-        // ── Entrar a una sala ─────────────────────────────────────────
-        async function enterRoom(name) {
-            roomId = name;
-            roomKey = await deriveRoomKey(name);
-            isCaller = false;
-
-            lobbyEl.hidden = true;
-            roomViewEl.hidden = false;
-            roomTitleEl.textContent = roomId;
-            setStatus("conectando...", false);
-            logEl.textContent = "";
-
-            console.log(`[room] entrando a "${roomId}" como myId=${myId}`);
-
-            // Presencia: registrarse y limpiar al desconectar.
-            const presRef = ref(db, `rooms/${roomId}/presence/${myId}`);
-            await set(presRef, true);
-            onDisconnect(presRef).remove();
-            console.log("[room] presencia registrada");
-
-            // Meta: actualizar last_use (redondeado a 5 min).
-            const roundedNow = Math.floor(Date.now() / 300_000) * 300_000;
-            const metaRef    = ref(db, `rooms/${roomId}/meta`);
-            const metaSnap   = await get(metaRef);
-            if (!metaSnap.exists()) {
-                await set(metaRef, { date_created: roundedNow, last_use: roundedNow });
-            } else {
-                await update(metaRef, { last_use: roundedNow });
-            }
-
-            await startWebRTC();
-        }
-
-        // ── WebRTC: host/client election ──────────────────────────────
-        async function startWebRTC() {
-            const lockR    = ref(db, `rooms/${roomId}/callerClaimed`);
-            const [lockSnap, presSnap] = await Promise.all([
-                get(lockR),
-                get(ref(db, `rooms/${roomId}/presence`)),
-            ]);
-            const lockedById = lockSnap.val();
-            const presence   = presSnap.val() || {};
-
-            // Remove stale lock left by a previous host that disconnected without cleanup.
-            if (lockedById && !presence[lockedById]) {
-                console.log(`[join] lock stale (${lockedById} ya no está), limpiando sala...`);
-                await Promise.all([
-                    remove(lockR),
-                    remove(ref(db, `rooms/${roomId}/connections`)),
-                ]);
-            }
-
-            console.log("[join] intentando reclamar rol de caller...");
-            const tx = await runTransaction(lockR, current => {
-                if (current === null) return myId;
-                return; // abort — already claimed
-            });
-            console.log("[join] transacción committed:", tx.committed);
-
-            if (tx.committed) {
-                // ─── SOY HOST (caller / A) ────────────────────────────
-                isCaller = true;
-                console.log("[join] soy HOST");
-
-                // When this tab closes, Firebase removes the lock and all signaling.
-                onDisconnect(lockR).remove();
-                onDisconnect(ref(db, `rooms/${roomId}/connections`)).remove();
-
-                // Start the game panel immediately (no DC needed yet).
-                initGameHost(gameContainer);
-
-                // Watch for new clients joining presence — open a PeerConnection per client.
-                presenceAddedUnsub = onChildAdded(ref(db, `rooms/${roomId}/presence`), snap => {
-                    const clientId = snap.key;
-                    if (clientId === myId) return; // skip self
-                    connectToClient(clientId);
-                });
-
-                // Watch for clients leaving — remove them from the game.
-                presenceRemovedUnsub = onChildRemoved(ref(db, `rooms/${roomId}/presence`), snap => {
-                    const clientId = snap.key;
-                    if (clientId === myId) return;
-                    console.log(`[presence] ${clientId} salió`);
-                    removeGamePeer(clientId);
-                    closePeer(clientId);
-                });
-
-            } else {
-                // ─── SOY CLIENT (callee / B) ──────────────────────────
-                console.log("[join] soy CLIENT — esperando offer en connections/" + myId);
-
-                clientPc = new RTCPeerConnection({ iceServers: window.iceServers });
-
-                clientPc.onicecandidate = async e => {
-                    if (!e.candidate) return;
-                    const enc = await encryptVal(roomKey, { from: "client", candidate: e.candidate.toJSON() });
-                    push(ref(db, `rooms/${roomId}/connections/${myId}/candidates`), enc);
-                };
-
-                clientPc.onicegatheringstatechange = () =>
-                    console.log("[ICE] gatheringState →", clientPc.iceGatheringState);
-
-                clientPc.oniceconnectionstatechange = () =>
-                    console.log("[ICE] iceConnectionState →", clientPc.iceConnectionState);
-
-                clientPc.onconnectionstatechange = () => {
-                    const s = clientPc.connectionState;
-                    console.log("[PC] connectionState →", s);
-                    setStatus(s, s === "connected");
-
-                    if (s === "connected") {
-                        log("🟢 conectado");
-                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-                        remove(ref(db, `rooms/${roomId}/connections/${myId}/candidates`));
-                    }
-                    if (s === "failed") {
-                        log("🔴 conexión fallida — reconectando...");
-                        scheduleReconnect(500);
-                    }
-                    if (s === "disconnected") {
-                        log("🟡 el otro se desconectó — esperando...");
-                        scheduleReconnect(4000);
-                    }
-                };
-
-                // Route incoming data channels to the right handler.
-                clientPc.ondatachannel = e => {
-                    console.log("[DC] ondatachannel:", e.channel.label);
-                    if (e.channel.label === "chat") {
-                        dc = e.channel;
-                        setupDC();
-                    } else if (e.channel.label === "game") {
-                        clientGameDc = e.channel;
-                        clientGameDc.binaryType = "arraybuffer";
-                        clientGameDc.onopen = () => {
-                            console.log("[Game DC] open (client)");
-                            initGameClient(clientGameDc, gameContainer);
-                        };
-                    }
-                };
-
-                // initMedia must be called before setRemoteDescription so ontrack
-                // is already registered when the offer is processed.
-                initMedia(clientPc, mediaContainer);
-
-                // Listen for ICE candidates sent by the host.
-                clientCandidatesUnsub = onChildAdded(
-                    ref(db, `rooms/${roomId}/connections/${myId}/candidates`),
-                    async snap => {
-                        let data;
-                        try { data = await decryptVal(roomKey, snap.val()); }
-                        catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
-                        if (data.from !== "host") return;
-                        clientPendingCandidates.push(data.candidate);
-                        flushClientCandidates();
-                    }
-                );
-
-                // Wait for the host's offer.
-                let lastOfferSeq = 0;
-                onValue(ref(db, `rooms/${roomId}/connections/${myId}/offer`), async snap => {
-                    if (!snap.exists()) return;
-                    let type, sdp, seq;
-                    try { ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val())); }
-                    catch (e) { console.warn("[Firebase] no se pudo descifrar offer:", e); return; }
-                    if (seq <= lastOfferSeq) return;
-                    lastOfferSeq = seq;
-                    console.log(`[Firebase] offer descifrado (seq=${seq}) → setRemoteDescription...`);
-                    try {
-                        await clientPc.setRemoteDescription({ type, sdp });
-                        console.log("[SDP] setRemoteDescription(offer) OK");
-                        await flushClientCandidates();
-
-                        // Ensure sendrecv so the client can also send media.
-                        for (const t of clientPc.getTransceivers()) {
-                            if (t.direction === "recvonly") t.direction = "sendrecv";
-                        }
-
-                        const answer    = await clientPc.createAnswer();
-                        await clientPc.setLocalDescription(answer);
-                        console.log("[SDP] setLocalDescription(answer)");
-                        const encAnswer = await encryptVal(roomKey, { type: answer.type, sdp: answer.sdp, seq });
-                        await set(ref(db, `rooms/${roomId}/connections/${myId}/answer`), encAnswer);
-                        console.log(`[Firebase] answer subido cifrado (seq=${seq})`);
-                    } catch (e) {
-                        console.error("[SDP] error procesando offer:", e);
-                    }
-                });
-            }
-        }
-
-        // ── connectToClient (host only) ───────────────────────────────
-        /**
-         * Open a dedicated RTCPeerConnection to one client.
-         * The first connected client also gets media (video/audio) and the
-         * chat-drawing module; subsequent clients get only the game channel.
-         *
-         * @param {string} clientId - Firebase presence key for this client.
-         */
-        async function connectToClient(clientId) {
-            if (peerMap.has(clientId)) return;
-
-            const isFirstPeer = peerMap.size === 0;
-            const peerPc      = new RTCPeerConnection({ iceServers: window.iceServers });
-            const peer        = {
-                pc: peerPc,
-                dc: null,
-                gameDc: null,
-                pendingCandidates: [],
-                candidatesUnsub: null,
-            };
-            peerMap.set(clientId, peer);
-            console.log(`[Host] connecting to ${clientId} (first=${isFirstPeer})`);
-
-            // ICE: send our candidates to the client's Firebase path.
-            peerPc.onicecandidate = async e => {
-                if (!e.candidate) return;
-                const enc = await encryptVal(roomKey, { from: "host", candidate: e.candidate.toJSON() });
-                push(ref(db, `rooms/${roomId}/connections/${clientId}/candidates`), enc);
-            };
-
-            peerPc.onicegatheringstatechange = () =>
-                console.log(`[ICE:${clientId}] gatheringState →`, peerPc.iceGatheringState);
-
-            peerPc.onconnectionstatechange = () => {
-                const s = peerPc.connectionState;
-                console.log(`[PC:${clientId}] connectionState →`, s);
-                if (s === "connected") {
-                    if (isFirstPeer) { setStatus(s, true); log("🟢 conectado"); }
-                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-                    remove(ref(db, `rooms/${roomId}/connections/${clientId}/candidates`));
-                }
-                if (s === "failed") {
-                    console.warn(`[PC:${clientId}] failed — removing peer`);
-                    removeGamePeer(clientId);
-                    closePeer(clientId);
-                }
-                if (s === "disconnected" && isFirstPeer) {
-                    // Only schedule reconnect for the first (primary) peer.
-                    // Additional peers are simply removed when they leave presence.
-                    log("🟡 el otro se desconectó — esperando...");
-                    scheduleReconnect(4000);
-                }
-            };
-
-            // ── Data channels ───────────────────────────────────────
-            peer.dc = peerPc.createDataChannel("chat");
-            if (isFirstPeer) {
-                dc = peer.dc; // expose as primary DC for send() / drawing
-                setupDC();
-            } else {
-                // Basic handlers for non-primary peers.
-                peer.dc.onclose = () => {};
-                peer.dc.onerror = e => console.error(`[DC:${clientId}] error:`, e);
-                peer.dc.onmessage = e => {
-                    if (typeof e.data === "string") log("📩 " + e.data);
-                };
-            }
-
-            peer.gameDc = peerPc.createDataChannel("game");
-            peer.gameDc.binaryType = "arraybuffer";
-            peer.gameDc.onopen = () => {
-                console.log(`[Game DC] open (host→${clientId})`);
-                addGamePeer(clientId, peer.gameDc);
-            };
-
-            // ── Media — only for the first connected client ─────────
-            if (isFirstPeer) {
-                // Pre-negotiate sendrecv transceivers so replaceTrack works
-                // without renegotiation.
-                peerPc.addTransceiver("video", { direction: "sendrecv" });
-                peerPc.addTransceiver("audio", { direction: "sendrecv" });
-                initMedia(peerPc, mediaContainer);
-            }
-
-            // ── SDP negotiation ─────────────────────────────────────
-            let negotiationSeq = 0;
-            let lastAnswerSeq  = 0;
-
-            peerPc.onnegotiationneeded = async () => {
-                if (peerPc.signalingState !== "stable") return;
-                negotiationSeq++;
-                const seq = negotiationSeq;
-                console.log(`[SDP:${clientId}] onnegotiationneeded (seq=${seq})`);
-                try {
-                    const offer    = await peerPc.createOffer();
-                    await peerPc.setLocalDescription(offer);
-                    const encOffer = await encryptVal(roomKey, { type: offer.type, sdp: offer.sdp, seq });
-                    await set(ref(db, `rooms/${roomId}/connections/${clientId}/offer`), encOffer);
-                    console.log(`[Firebase] offer subido para ${clientId} (seq=${seq})`);
-                } catch (e) {
-                    console.error(`[SDP:${clientId}] onnegotiationneeded error:`, e);
-                }
-            };
-
-            // Listen for this client's answer.
-            onValue(ref(db, `rooms/${roomId}/connections/${clientId}/answer`), async snap => {
-                if (!snap.exists()) return;
-                let type, sdp, seq;
-                try { ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val())); }
-                catch (e) { console.warn(`[Firebase] no se pudo descifrar answer de ${clientId}:`, e); return; }
-                if (seq <= lastAnswerSeq) return;
-                lastAnswerSeq = seq;
-                console.log(`[Firebase] answer de ${clientId} (seq=${seq}) → setRemoteDescription...`);
-                try {
-                    await peerPc.setRemoteDescription({ type, sdp });
-                    console.log(`[SDP:${clientId}] setRemoteDescription(answer) OK`);
-                    flushPeerCandidates(peerPc, peer.pendingCandidates);
-                } catch (e) {
-                    console.error(`[SDP:${clientId}] setRemoteDescription(answer) ERROR:`, e);
-                }
-            });
-
-            // Listen for ICE candidates from this client.
-            peer.candidatesUnsub = onChildAdded(
-                ref(db, `rooms/${roomId}/connections/${clientId}/candidates`),
-                async snap => {
-                    let data;
-                    try { data = await decryptVal(roomKey, snap.val()); }
-                    catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
-                    if (data.from !== "client") return;
-                    peer.pendingCandidates.push(data.candidate);
-                    flushPeerCandidates(peerPc, peer.pendingCandidates);
-                }
-            );
-        }
-
-        // ── Peer cleanup ──────────────────────────────────────────────
-        function closePeer(clientId) {
-            const peer = peerMap.get(clientId);
-            if (!peer) return;
-            if (peer.candidatesUnsub) peer.candidatesUnsub();
-            try { peer.pc.close(); } catch (_) {}
-            peerMap.delete(clientId);
-            console.log(`[Host] peer ${clientId} closed`);
-        }
-
-        function flushPeerCandidates(peerPc, queue) {
-            if (!peerPc.remoteDescription) return;
-            while (queue.length) {
-                const init = queue.shift();
-                if (!init?.candidate) continue;
-                const patched = { ...init };
-                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
-                peerPc.addIceCandidate(patched).catch(e => console.error("[ICE] addIceCandidate ERROR:", e));
-            }
-        }
-
-        // ── Client candidate flush ────────────────────────────────────
-        async function flushClientCandidates() {
-            if (!clientPc || !clientPc.remoteDescription) return;
-            while (clientPendingCandidates.length) {
-                const init = clientPendingCandidates.shift();
-                if (!init?.candidate) continue;
-                const patched = { ...init };
-                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
-                try { await clientPc.addIceCandidate(patched); }
-                catch (e) { console.error("[ICE] addIceCandidate ERROR:", e); }
-            }
-        }
-
-        // ── Reconnect (client / first peer only) ──────────────────────
-        async function scheduleReconnect(delayMs) {
-            if (reconnectTimer) clearTimeout(reconnectTimer);
-            reconnectTimer = setTimeout(async () => {
-                reconnectTimer = null;
-                if (!roomId) return;
-                console.log("[reconnect] reiniciando WebRTC...");
-                log("↻ reconectando...");
-                destroyMedia();
-                destroyGame();
-
-                if (isCaller) {
-                    // Host: tear down all peer connections.
-                    if (presenceAddedUnsub)   { presenceAddedUnsub();   presenceAddedUnsub   = null; }
-                    if (presenceRemovedUnsub) { presenceRemovedUnsub(); presenceRemovedUnsub = null; }
-                    for (const { pc: peerPc, candidatesUnsub } of peerMap.values()) {
-                        if (candidatesUnsub) candidatesUnsub();
-                        try { peerPc.close(); } catch (_) {}
-                    }
-                    peerMap.clear();
-                } else {
-                    // Client: tear down the single connection.
-                    if (clientCandidatesUnsub) { clientCandidatesUnsub(); clientCandidatesUnsub = null; }
-                    if (clientPc) { clientPc.close(); clientPc = null; }
-                    clientPendingCandidates = [];
-                }
-
-                dc = null;
-                isCaller = false;
-                await startWebRTC();
-            }, delayMs);
-        }
-
-        // ── Chat data channel setup ───────────────────────────────────
-        // Uses the module-level `dc` variable; call after dc is assigned.
-        function setupDC() {
-            dc.onopen = () => {
-                console.log("[DC] open!");
-                log("🟢 conectado");
-                destroyDrawing();
-                initDrawing(dc, drawingContainer);
-            };
-            dc.onclose = () => { console.log("[DC] closed"); };
-            dc.onerror = e => console.error("[DC] error:", e);
-            dc.onmessage = e => {
-                if (typeof e.data === "string") {
-                    console.log("[DC] mensaje:", e.data);
-                    log("📩 " + e.data);
-                }
-            };
-        }
-
-        // ── Leave room ────────────────────────────────────────────────
-        async function leaveRoom() {
-            destroyMedia();
-            destroyDrawing();
-            destroyGame();
-
-            if (isCaller) {
-                if (presenceAddedUnsub)   { presenceAddedUnsub();   presenceAddedUnsub   = null; }
-                if (presenceRemovedUnsub) { presenceRemovedUnsub(); presenceRemovedUnsub = null; }
-                for (const { pc: peerPc, candidatesUnsub } of peerMap.values()) {
-                    if (candidatesUnsub) candidatesUnsub();
-                    try { peerPc.close(); } catch (_) {}
-                }
-                peerMap.clear();
-            } else {
-                if (clientCandidatesUnsub) { clientCandidatesUnsub(); clientCandidatesUnsub = null; }
-                if (clientPc) { clientPc.close(); clientPc = null; }
-                clientPendingCandidates = [];
-            }
-
-            dc = null;
-
-            if (roomId) {
-                await Promise.all([
-                    remove(ref(db, `rooms/${roomId}/presence/${myId}`)),
-                    remove(ref(db, `rooms/${roomId}/callerClaimed`)),
-                    isCaller
-                        ? remove(ref(db, `rooms/${roomId}/connections`))
-                        : remove(ref(db, `rooms/${roomId}/connections/${myId}`)),
-                ]);
-            }
-
-            roomId   = null;
-            isCaller = false;
-            roomViewEl.hidden = true;
-            lobbyEl.hidden    = false;
-            cleanupOldRooms();
-        }
-
-        // ── UI helpers ────────────────────────────────────────────────
-
-        function log(t) { logEl.textContent += t + "\n"; }
-
-        function timeAgo(ts) {
-            const diff = Date.now() - ts;
-            if (diff < 60_000)     return "hace menos de 1 min";
-            if (diff < 3_600_000)  return `hace ${Math.floor(diff / 60_000)} min`;
-            if (diff < 86_400_000) return `hace ${Math.floor(diff / 3_600_000)}h`;
-            return `hace ${Math.floor(diff / 86_400_000)}d`;
-        }
-
-        function setStatus(text, connected) {
-            statusEl.textContent = text;
-            statusEl.className   = connected ? "connected" : "";
-        }
-
-        function send() {
-            if (dc && dc.readyState === "open") {
-                dc.send(msgInput.value);
-                log("📤 " + msgInput.value);
-                msgInput.value = "";
-            } else {
-                log("⚠️ no conectado");
-            }
-        }
-
-        // ── Event listeners ───────────────────────────────────────────
-
-        document.getElementById("btn-join-channel").addEventListener("click", () => {
-            const name = channelInput.value.trim();
-            if (name) enterRoom(name);
-        });
-
-        document.getElementById("btn-send").addEventListener("click", send);
-
-        msgInput.addEventListener("keydown", e => { if (e.key === "Enter") send(); });
-
-        document.getElementById("btn-leave").addEventListener("click", leaveRoom);
-
-        // ── Auto-join al cargar ───────────────────────────────────────
-        cleanupOldRooms()//.then(() => enterRoom("default"));
+        new App();
     </script>
 
 </body>
