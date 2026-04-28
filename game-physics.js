@@ -37,10 +37,29 @@ const MAX_SPEED = 420;
 /** Inset from each arena edge so the emoji character never clips the border. */
 const EDGE_PAD = 22;
 
+// ─── Color palette ────────────────────────────────────────────────────────────
+
+/**
+ * One colour per entity slot (index = entity ID).
+ * Entity 0 is always the host (blue); subsequent IDs are clients in join order.
+ * Exported so game-host.js, game-client.js, and game-renderer.js can all share
+ * the same palette without any hard-coded colour strings.
+ */
+export const PLAYER_COLORS = [
+    '#3b82f6', // 0 — host   (blue)
+    '#ef4444', // 1 — client (red)
+    '#22c55e', // 2          (green)
+    '#f59e0b', // 3          (amber)
+    '#a855f7', // 4          (purple)
+    '#ec4899', // 5          (pink)
+    '#14b8a6', // 6          (teal)
+    '#f97316', // 7          (orange)
+];
+
 // ─── SoA buffers (module-level, allocated once) ───────────────────────────────
 
 /** Maximum number of simultaneous entities. */
-const MAX_ENTITIES = 8;
+export const MAX_ENTITIES = 8;
 
 export const POS_X = new Float32Array(MAX_ENTITIES);
 export const POS_Y = new Float32Array(MAX_ENTITIES);

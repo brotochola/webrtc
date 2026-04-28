@@ -1,221 +1,299 @@
 /**
  * game-host.js
  *
- * Host-side game logic. The host (A / caller) is the single source of truth
- * for all physics. It:
+ * Host-side game logic for the star topology (1 host + N clients).
  *
- *   1. Runs a requestAnimationFrame loop that updates both players every frame.
- *   2. Broadcasts both players' positions every SEND_EVERY frames inside the rAF
- *      loop using a persistent Float32Array(6) buffer — zero allocations per send.
- *   3. Listens for incoming Int8Array(2) packets that carry the client's
- *      directional input and feeds them into the client player's physics.
- *   4. Captures the host's own keyboard input via an InputHandler instance.
+ * The host is the sole physics authority. It:
+ *
+ *   1. Owns a Player entity for itself (entity 0) and one per connected client.
+ *   2. Runs a requestAnimationFrame loop that steps all entities every frame.
+ *   3. Broadcasts the full state (position + velocity for every entity) to each
+ *      connected client every SEND_EVERY frames.
+ *   4. Receives Int8Array([ax, ay]) input packets from each client and routes
+ *      them to the correct player entity.
+ *   5. Exposes addPeer() / removePeer() so index.html can plug in game data
+ *      channels as clients join and leave.
  */
 
-import { Player, POS_X, POS_Y, VEL_X, VEL_Y } from "./game-physics.js";
-import { InputHandler } from "./game-input.js";
-import { ARENA_W, ARENA_H } from "./game-renderer.js";
+import { Player, POS_X, POS_Y, VEL_X, VEL_Y, PLAYER_COLORS, MAX_ENTITIES } from './game-physics.js';
+import { InputHandler } from './game-input.js';
+import { ARENA_W, ARENA_H } from './game-renderer.js';
 
-/** Fill colours for each player's circle. */
-const HOST_COLOR   = '#3b82f6';   // blue
-const CLIENT_COLOR = '#ef4444';   // red
-
-/**
- * Maximum allowed dt (seconds) passed to Player.update().
- * Caps the physics step when the tab is backgrounded or the frame rate drops,
- * preventing players from teleporting large distances.
- */
+/** dt cap — prevents huge physics jumps when the tab is backgrounded. */
 const MAX_DT = 0.1;
 
 /**
- * Send a position packet every SEND_EVERY frames.
- * At 60 fps, 3 frames ≈ 50 ms (≈ 20 Hz) — no setInterval needed.
+ * Broadcast every SEND_EVERY rAF frames (~20 Hz at 60 fps).
+ * No setInterval needed — the rAF loop counts frames.
  */
 const SEND_EVERY = 3;
 
+/** Horizontal distance from centre where new players spawn. */
+const SPAWN_OFFSET_X = 60;
+
 /**
- * Horizontal offset (px) applied to the center spawn so the two players
- * start side-by-side instead of on top of each other.
+ * Spread players evenly across the vertical axis so they don't all stack.
+ * Vertical spawn position for entity i: ARENA_H * SPAWN_Y_FRACS[i].
  */
-const SPAWN_OFFSET = 60;
+const SPAWN_Y_FRACS = [0.5, 0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85];
+
+/**
+ * Horizontal spawn positions (fraction of ARENA_W) for the first 8 entities.
+ * Entity 0 (host) always spawns left-of-centre.
+ */
+const SPAWN_X_FRACS = [0.3, 0.7, 0.2, 0.8, 0.4, 0.6, 0.25, 0.75];
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * GameHost
  *
- * Owns the authoritative state of both players and drives the physics loop.
- * Instantiated by the facade (game.js) when the local peer is the host.
+ * Instantiated by the facade (game.js) when the local peer wins the host
+ * election. Clients are plugged in later via addPeer().
  */
 export class GameHost {
-  /**
-   * @param {RTCDataChannel} dc           - The "game" data channel (already open).
-   * @param {import('./game-renderer.js').GameRenderer} renderer
-   */
-  constructor(dc, renderer) {
-    this._dc = dc;
-    this._renderer = renderer;
+    /**
+     * @param {import('./game-renderer.js').GameRenderer} renderer
+     */
+    constructor(renderer) {
+        this._renderer = renderer;
 
-    // Spawn both players at the vertical centre, offset left/right so they
-    // don't overlap. Entity IDs (0, 1) must match CLIENT_ENTITY_ID constants
-    // in game-client.js.
-    this._hostPlayer = new Player(
-      0,
-      HOST_COLOR,
-      ARENA_W / 2 - SPAWN_OFFSET,
-      ARENA_H / 2,
-    );
-    this._clientPlayer = new Player(
-      1,
-      CLIENT_COLOR,
-      ARENA_W / 2 + SPAWN_OFFSET,
-      ARENA_H / 2,
-    );
+        /**
+         * Entity 0 — the host's own player.
+         * Controlled by local keyboard via InputHandler.
+         */
+        this._hostPlayer = new Player(
+            0,
+            PLAYER_COLORS[0],
+            ARENA_W * SPAWN_X_FRACS[0],
+            ARENA_H * SPAWN_Y_FRACS[0],
+        );
+
+        /**
+         * Per-client peer state.
+         * key   = clientId (string, from Firebase presence)
+         * value = { dc, player, entityId, onMessage }
+         *
+         * @type {Map<string, { dc: RTCDataChannel, player: Player, entityId: number, onMessage: Function }>}
+         */
+        this._peers = new Map();
+
+        /**
+         * Persistent broadcast buffer.
+         * Reallocated by _rebuildBroadcastBuffer() whenever a peer joins/leaves.
+         * Layout: [frameNo, timestamp, playerCount, posX₀, posY₀, velX₀, velY₀, posX₁, …]
+         * @type {Float32Array}
+         */
+        this._posBuf = null;
+        this._rebuildBroadcastBuffer();
+
+        this._frameCount = 0;
+        this._rafId      = null;
+        this._lastTime   = 0;
+
+        // Host player is driven by local keyboard.
+        this._input = new InputHandler((ax, ay) => {
+            this._hostPlayer.setInput(ax, ay);
+        });
+
+        // Draw the initial frame (just the host player) immediately.
+        this._render();
+    }
+
+    // ─── Lifecycle ───────────────────────────────────────────────────────────
+
+    /** Start the physics + render loop. Called by the facade after construction. */
+    start() {
+        this._lastTime = performance.now();
+        this._rafId    = requestAnimationFrame(this._loop.bind(this));
+    }
 
     /**
-     * Persistent send buffer — never reallocated after construction.
+     * Register a new client's game data channel.
      *
-     * Layout (Float32 × 10 = 40 bytes):
-     *   [0] frameNo      — monotonic frame counter (cast to f32, exact up to 2²⁴)
-     *   [1] timestamp_ms — performance.now() from the rAF callback
-     *   [2] hostX        [3] hostY
-     *   [4] clientX      [5] clientY
-     *   [6] hostVX       [7] hostVY    ← velocities for dead reckoning on client
-     *   [8] clientVX     [9] clientVY
+     * Assigns the next available entity ID (1, 2, …), creates a Player,
+     * sends a 1-byte setup packet to tell the client its entity ID, and
+     * wires up the input-message listener.
+     *
+     * @param {string}         clientId - Firebase presence key for this client.
+     * @param {RTCDataChannel} dc       - The open "game" data channel to this client.
      */
-    this._posBuf = new Float32Array(10);
+    addPeer(clientId, dc) {
+        if (this._peers.has(clientId)) return; // guard against duplicate calls
 
-    // Monotonic frame counter; used both for the send-throttle and the packet header.
-    this._frameCount = 0;
+        const entityId = this._peers.size + 1; // entity 0 = host, 1+ = clients
 
-    // rAF handle — stored so the loop can be cancelled in destroy().
-    this._rafId = null;
+        if (entityId >= MAX_ENTITIES) {
+            console.warn(`[GameHost] addPeer: reached MAX_ENTITIES (${MAX_ENTITIES}), ignoring ${clientId}`);
+            return;
+        }
 
-    // Timestamp of the previous frame (set on start).
-    this._lastTime = 0;
+        const player = new Player(
+            entityId,
+            PLAYER_COLORS[entityId],
+            ARENA_W * SPAWN_X_FRACS[entityId],
+            ARENA_H * SPAWN_Y_FRACS[entityId],
+        );
 
-    // Listen for directional input packets coming from the client.
-    this._onMessage = this._handleClientMessage.bind(this);
-    this._dc.addEventListener("message", this._onMessage);
+        // Tell the client which entity ID it owns — distinguished by byteLength=1.
+        dc.send(new Int8Array([entityId]).buffer);
 
-    // Capture the host's own keyboard input and apply it to the host player.
-    this._input = new InputHandler((ax, ay) => {
-      this._hostPlayer.setInput(ax, ay);
-    });
-  }
+        const onMessage = this._makeInputHandler(player);
+        dc.addEventListener('message', onMessage);
 
-  // ─── Lifecycle ───────────────────────────────────────────────────────────
+        this._peers.set(clientId, { dc, player, entityId, onMessage });
+        this._rebuildBroadcastBuffer();
+        this._updateLegend();
 
-  /**
-   * Start the physics loop and the position-broadcast timer.
-   * Must be called once after construction (called by the facade).
-   */
-  start() {
-    this._lastTime = performance.now();
-    this._rafId = requestAnimationFrame(this._loop.bind(this));
-  }
-
-  /**
-   * Stop all loops, remove all listeners, and release references.
-   * Called by the facade when leaving the room or reconnecting.
-   */
-  destroy() {
-    if (this._rafId !== null) {
-      cancelAnimationFrame(this._rafId);
-      this._rafId = null;
+        console.log(`[GameHost] peer added: ${clientId} → entity ${entityId}`);
     }
 
-    this._dc.removeEventListener("message", this._onMessage);
-    this._input.destroy();
-  }
+    /**
+     * Deregister a client (e.g. on disconnect).
+     * Removes the player from the simulation and frees the entity slot.
+     *
+     * @param {string} clientId
+     */
+    removePeer(clientId) {
+        const peer = this._peers.get(clientId);
+        if (!peer) return;
 
-  // ─── Private — physics loop ──────────────────────────────────────────────
+        peer.dc.removeEventListener('message', peer.onMessage);
+        this._peers.delete(clientId);
+        this._rebuildBroadcastBuffer();
+        this._updateLegend();
 
-  /**
-   * rAF callback. Computes dt, steps both players, re-renders.
-   * @param {number} now - DOMHighResTimeStamp provided by requestAnimationFrame.
-   * @private
-   */
-  _loop(now) {
-    // Compute delta-time in seconds, capped to prevent huge jumps.
-    const dt = Math.min((now - this._lastTime) / 1000, MAX_DT);
-    this._lastTime = now;
-
-    this._frameCount++;
-
-    // Advance physics for both players.
-    this._hostPlayer.update(dt, ARENA_W, ARENA_H);
-    this._clientPlayer.update(dt, ARENA_W, ARENA_H);
-
-    // Redraw the canvas with the updated positions.
-    this._renderer.render(this._hostPlayer, this._clientPlayer);
-
-    // Broadcast every SEND_EVERY frames — no setInterval needed.
-    // `now` comes straight from the rAF callback so no extra performance.now() call.
-    if (this._frameCount % SEND_EVERY === 0) {
-      this._broadcastPositions(now);
+        console.log(`[GameHost] peer removed: ${clientId}`);
     }
 
-    // Schedule next frame.
-    this._rafId = requestAnimationFrame(this._loop.bind(this));
-  }
+    /** Stop the loop and clean up all listeners. */
+    destroy() {
+        if (this._rafId !== null) {
+            cancelAnimationFrame(this._rafId);
+            this._rafId = null;
+        }
+        for (const { dc, onMessage } of this._peers.values()) {
+            dc.removeEventListener('message', onMessage);
+        }
+        this._peers.clear();
+        this._input.destroy();
+    }
 
-  // ─── Private — network ───────────────────────────────────────────────────
+    // ─── Private — helpers ────────────────────────────────────────────────────
 
-  /**
-   * Write the current frame header + both players' positions and velocities
-   * into the persistent _posBuf and send it as-is — zero allocations per call.
-   *
-   * Packet layout (Float32 × 10 = 40 bytes):
-   *   [0] frameNo      [1] timestamp_ms
-   *   [2] hostX        [3] hostY
-   *   [4] clientX      [5] clientY
-   *   [6] hostVX       [7] hostVY
-   *   [8] clientVX     [9] clientVY
-   *
-   * Velocities let the client extrapolate positions between packets
-   * (dead reckoning), producing smooth motion without extra network traffic.
-   *
-   * @param {number} now - DOMHighResTimeStamp forwarded from _loop().
-   * @private
-   */
-  _broadcastPositions(now) {
-    if (this._dc.readyState !== "open") return;
+    /**
+     * Returns all active Player objects in entity-ID order.
+     * Index 0 = host, index 1+ = clients in join order.
+     * @returns {Player[]}
+     */
+    _allPlayers() {
+        return [this._hostPlayer, ...Array.from(this._peers.values()).map(p => p.player)];
+    }
 
-    const hi = this._hostPlayer.id;
-    const ci = this._clientPlayer.id;
+    /**
+     * (Re)allocate the shared broadcast buffer to fit the current player count.
+     * Called whenever a peer joins or leaves.
+     *
+     * Buffer layout (Float32):
+     *   [0]       frameNo
+     *   [1]       timestamp_ms
+     *   [2]       playerCount  (N)
+     *   [3+i*4]   POS_X  for entity i
+     *   [4+i*4]   POS_Y  for entity i
+     *   [5+i*4]   VEL_X  for entity i
+     *   [6+i*4]   VEL_Y  for entity i
+     */
+    _rebuildBroadcastBuffer() {
+        const n      = 1 + this._peers.size; // host + all clients
+        this._posBuf = new Float32Array(3 + n * 4);
+    }
 
-    this._posBuf[0] = this._frameCount;
-    this._posBuf[1] = now;
-    this._posBuf[2] = POS_X[hi];
-    this._posBuf[3] = POS_Y[hi];
-    this._posBuf[4] = POS_X[ci];
-    this._posBuf[5] = POS_Y[ci];
-    this._posBuf[6] = VEL_X[hi];
-    this._posBuf[7] = VEL_Y[hi];
-    this._posBuf[8] = VEL_X[ci];
-    this._posBuf[9] = VEL_Y[ci];
+    /** Rebuild the renderer legend to match the current peer count. */
+    _updateLegend() {
+        const labels = ['Host', ...Array.from(this._peers.values()).map((_, i) => `Cliente ${i + 1}`)];
+        this._renderer.updateLegend(labels);
+    }
 
-    // .buffer is the backing ArrayBuffer of the Float32Array — no copy, no alloc.
-    this._dc.send(this._posBuf.buffer);
-  }
+    /** Convenience wrapper: render all current players. */
+    _render() {
+        this._renderer.render(this._allPlayers());
+    }
 
-  /**
-   * Handle an incoming message on the "game" data channel.
-   * Expected payload: Int8Array(2) — [ax, ay] from the client's InputHandler.
-   *
-   * @param {MessageEvent} e
-   * @private
-   */
-  _handleClientMessage(e) {
-    if (!(e.data instanceof ArrayBuffer)) return;
+    /**
+     * Create an onmessage handler bound to a specific client's Player.
+     * Reads Int8Array([ax, ay]) input packets and calls setInput().
+     *
+     * @param {Player} player
+     * @returns {(e: MessageEvent) => void}
+     */
+    _makeInputHandler(player) {
+        return (e) => {
+            if (!(e.data instanceof ArrayBuffer)) return;
+            const buf = new Int8Array(e.data);
+            // byteLength === 1 is a setup echo — ignore it
+            if (buf.byteLength !== 2) return;
+            player.setInput(buf[0], buf[1]);
+        };
+    }
 
-    const input = new Int8Array(e.data);
+    // ─── Private — physics loop ───────────────────────────────────────────────
 
-    // Guard against malformed packets.
-    if (input.byteLength < 2) return;
+    /**
+     * rAF callback. Steps all entities, redraws, broadcasts every SEND_EVERY frames.
+     * @param {DOMHighResTimeStamp} now
+     */
+    _loop(now) {
+        const dt = Math.min((now - this._lastTime) / 1000, MAX_DT);
+        this._lastTime = now;
+        this._frameCount++;
 
-    // Apply the client's directional intent to the client player's physics.
-    this._clientPlayer.setInput(input[0], input[1]);
-  }
+        // Advance physics for all active entities.
+        this._hostPlayer.update(dt, ARENA_W, ARENA_H);
+        for (const { player } of this._peers.values()) {
+            player.update(dt, ARENA_W, ARENA_H);
+        }
+
+        this._render();
+
+        if (this._frameCount % SEND_EVERY === 0) {
+            this._broadcastPositions(now);
+        }
+
+        this._rafId = requestAnimationFrame(this._loop.bind(this));
+    }
+
+    // ─── Private — network ────────────────────────────────────────────────────
+
+    /**
+     * Fill _posBuf with the current frame header and all entity states,
+     * then send it to every connected client.
+     *
+     * Zero allocations per call — _posBuf is reused every frame.
+     *
+     * @param {DOMHighResTimeStamp} now
+     */
+    _broadcastPositions(now) {
+        const players = this._allPlayers();
+        const n       = players.length;
+
+        this._posBuf[0] = this._frameCount;
+        this._posBuf[1] = now;
+        this._posBuf[2] = n;
+
+        for (let i = 0; i < n; i++) {
+            const id    = players[i].id;
+            const base  = 3 + i * 4;
+            this._posBuf[base]     = POS_X[id];
+            this._posBuf[base + 1] = POS_Y[id];
+            this._posBuf[base + 2] = VEL_X[id];
+            this._posBuf[base + 3] = VEL_Y[id];
+        }
+
+        // Send to every peer whose channel is open.
+        for (const { dc } of this._peers.values()) {
+            if (dc.readyState === 'open') {
+                dc.send(this._posBuf.buffer);
+            }
+        }
+    }
 }

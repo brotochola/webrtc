@@ -1,16 +1,17 @@
 /**
  * game.js — Public facade for the game panel.
  *
- * This is the only file that index.html needs to import. It hides the
- * internal class hierarchy (GameRenderer, GameHost, GameClient) behind
- * two simple functions: initGame() and destroyGame().
+ * This is the only file that index.html needs to import.
+ * It hides the internal class hierarchy behind five functions:
  *
- * Lifecycle contract:
- *   - Call initGame() once the "game" RTCDataChannel is open.
- *   - Call destroyGame() before closing/reconnecting the peer connection,
- *     or any time the room panel is hidden.
- *   - Calling initGame() when an instance already exists automatically
- *     destroys the previous one first (safe re-initialisation on reconnect).
+ *   initGameHost(containerEl)         — called once when host role is confirmed
+ *   initGameClient(dc, containerEl)   — called when the client's game DC opens
+ *   addGamePeer(clientId, dc)         — host calls this per new client DC open
+ *   removeGamePeer(clientId)          — host calls this on client disconnect
+ *   destroyGame()                     — tear everything down (leave / reconnect)
+ *
+ * Only one game instance is active at a time.  A second call to any init
+ * function automatically destroys the previous session.
  */
 
 import { GameRenderer } from './game-renderer.js';
@@ -19,49 +20,77 @@ import { GameClient }   from './game-client.js';
 
 // ─── Module-level singleton references ───────────────────────────────────────
 
-/**
- * Active game instance. Either a GameHost or a GameClient, depending on role.
- * null when no game is running.
- * @type {GameHost | GameClient | null}
- */
-let _instance = null;
+/** @type {GameHost | null} */
+let _host     = null;
 
-/**
- * Active renderer. Kept separately so destroy() can clear the DOM even if
- * _instance teardown fails for any reason.
- * @type {GameRenderer | null}
- */
+/** @type {GameClient | null} */
+let _client   = null;
+
+/** @type {GameRenderer | null} */
 let _renderer = null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Initialise the game panel for this peer.
+ * Initialise the host-side game panel.
  *
- * Creates a GameRenderer (injects the canvas into containerEl), then
- * either a GameHost (runs physics, broadcasts positions) or a GameClient
- * (receives positions, sends input) depending on the isHost flag.
+ * Creates the renderer and a GameHost instance (no data channel needed yet —
+ * peers are added later via addGamePeer() as clients join).
  *
- * @param {RTCDataChannel} dc           - The "game" data channel, already open.
- * @param {HTMLElement}    containerEl  - DOM node to inject the panel into.
- * @param {boolean}        isHost       - True if this peer is the caller (A).
+ * @param {HTMLElement} containerEl - DOM node to inject the game panel into.
  */
-export function initGame(dc, containerEl, isHost) {
-    // Tear down any previous session first (safe to call when null).
+export function initGameHost(containerEl) {
     destroyGame();
-
-    console.log(`[Game] init — role: ${isHost ? 'host' : 'client'}`);
+    console.log('[Game] init — role: host');
 
     _renderer = new GameRenderer(containerEl);
+    _host     = new GameHost(_renderer);
+    _host.start();
+}
 
-    if (isHost) {
-        // Host owns the physics simulation and streams positions.
-        _instance = new GameHost(dc, _renderer);
-        _instance.start();
-    } else {
-        // Client receives positions and streams input.
-        _instance = new GameClient(dc, _renderer);
+/**
+ * Initialise the client-side game panel.
+ *
+ * Creates the renderer and a GameClient instance.  The client's entity ID
+ * arrives later via a 1-byte setup packet from the host, so no entityId
+ * argument is needed here.
+ *
+ * @param {RTCDataChannel} dc          - The "game" data channel (already open).
+ * @param {HTMLElement}    containerEl - DOM node to inject the game panel into.
+ */
+export function initGameClient(dc, containerEl) {
+    destroyGame();
+    console.log('[Game] init — role: client');
+
+    _renderer = new GameRenderer(containerEl);
+    _client   = new GameClient(dc, _renderer);
+}
+
+/**
+ * Register a new client's game data channel with the host.
+ *
+ * Must only be called after initGameHost().  Safe to call from any async
+ * context (e.g. inside gameDc.onopen).
+ *
+ * @param {string}         clientId - Firebase presence key for this client.
+ * @param {RTCDataChannel} dc       - The "game" data channel to this client.
+ */
+export function addGamePeer(clientId, dc) {
+    if (!_host) {
+        console.warn('[Game] addGamePeer called but no host is running');
+        return;
     }
+    _host.addPeer(clientId, dc);
+}
+
+/**
+ * Deregister a client from the host (on disconnect).
+ *
+ * @param {string} clientId
+ */
+export function removeGamePeer(clientId) {
+    if (!_host) return;
+    _host.removePeer(clientId);
 }
 
 /**
@@ -69,10 +98,16 @@ export function initGame(dc, containerEl, isHost) {
  * Safe to call multiple times or when nothing is running.
  */
 export function destroyGame() {
-    if (_instance) {
-        console.log('[Game] destroy');
-        _instance.destroy();
-        _instance = null;
+    if (_host) {
+        console.log('[Game] destroy host');
+        _host.destroy();
+        _host = null;
+    }
+
+    if (_client) {
+        console.log('[Game] destroy client');
+        _client.destroy();
+        _client = null;
     }
 
     if (_renderer) {

@@ -57,12 +57,16 @@
     <script type="module">
         import { initDrawing, destroyDrawing } from "./drawing.js";
         import { initMedia, destroyMedia }     from "./media.js";
-        import { initGame,  destroyGame }      from "./game.js";
+        import {
+            initGameHost, initGameClient,
+            addGamePeer,  removeGamePeer,
+            destroyGame,
+        } from "./game.js";
         import { deriveRoomKey, encryptVal, decryptVal } from "./crypto-utils.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import {
             getDatabase, ref, set, update, push, remove, get,
-            onChildAdded, onValue, runTransaction, onDisconnect
+            onChildAdded, onChildRemoved, onValue, runTransaction, onDisconnect
         } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
 
         const firebaseConfig = {
@@ -83,20 +87,47 @@
         console.log("[init] myId:", myId);
 
         // ── UI refs ──────────────────────────────────────────────────
-        const lobbyEl = document.getElementById("lobby");
-        const roomViewEl = document.getElementById("room-view");
+        const lobbyEl        = document.getElementById("lobby");
+        const roomViewEl     = document.getElementById("room-view");
         const channelsListEl = document.getElementById("channels-list");
-        const channelInput = document.getElementById("channel-input");
-        const roomTitleEl = document.getElementById("room-title");
-        const statusEl = document.getElementById("room-status");
-        const logEl = document.getElementById("log");
-        const msgInput = document.getElementById("msg");
+        const channelInput   = document.getElementById("channel-input");
+        const roomTitleEl    = document.getElementById("room-title");
+        const statusEl       = document.getElementById("room-status");
+        const logEl          = document.getElementById("log");
+        const msgInput       = document.getElementById("msg");
+        const drawingContainer = document.getElementById("drawing-container");
+        const mediaContainer   = document.getElementById("media-container");
+        const gameContainer    = document.getElementById("game-container");
 
         // ── State ────────────────────────────────────────────────────
-        let pc, dc, gameDc, roomId, roomKey, isCaller;
-        let pendingCandidates = [];
-        let candidatesUnsub = null;
+        let roomId, roomKey, isCaller;
         let reconnectTimer = null;
+
+        /**
+         * Host-only: one entry per connected client.
+         * key   = clientId (Firebase presence key)
+         * value = { pc, dc, gameDc, pendingCandidates, candidatesUnsub }
+         * @type {Map<string, object>}
+         */
+        const peerMap = new Map();
+
+        /** Firebase onChildAdded unsub for watching presence (host only). */
+        let presenceAddedUnsub  = null;
+        /** Firebase onChildRemoved unsub for watching presence (host only). */
+        let presenceRemovedUnsub = null;
+
+        /**
+         * Primary chat DC used by the UI's send() / setupDC().
+         * Host: set to the first peer's chat channel.
+         * Client: set to the single connection's chat channel.
+         */
+        let dc = null;
+
+        // Client-only single connection state.
+        let clientPc               = null;
+        let clientGameDc           = null;
+        let clientPendingCandidates = [];
+        let clientCandidatesUnsub  = null;
 
         const TEN_MIN = 10 * 60 * 1000;
 
@@ -174,9 +205,7 @@
             roomId = name;
             roomKey = await deriveRoomKey(name);
             isCaller = false;
-            pendingCandidates = [];
 
-            lobbyEl.hidden = false; // lobby sigue visible debajo (por referencia)
             lobbyEl.hidden = true;
             roomViewEl.hidden = false;
             roomTitleEl.textContent = roomId;
@@ -185,296 +214,397 @@
 
             console.log(`[room] entrando a "${roomId}" como myId=${myId}`);
 
-            // Presencia: nos registramos y nos borramos al desconectar
+            // Presencia: registrarse y limpiar al desconectar.
             const presRef = ref(db, `rooms/${roomId}/presence/${myId}`);
             await set(presRef, true);
             onDisconnect(presRef).remove();
             console.log("[room] presencia registrada");
 
-            // Meta: crear o actualizar last_use — redondeado a 5 min para reducir
-            // la precisión temporal disponible en Firebase.
+            // Meta: actualizar last_use (redondeado a 5 min).
             const roundedNow = Math.floor(Date.now() / 300_000) * 300_000;
-            const metaRef = ref(db, `rooms/${roomId}/meta`);
-            const metaSnap = await get(metaRef);
+            const metaRef    = ref(db, `rooms/${roomId}/meta`);
+            const metaSnap   = await get(metaRef);
             if (!metaSnap.exists()) {
                 await set(metaRef, { date_created: roundedNow, last_use: roundedNow });
-                console.log("[room] meta creado");
             } else {
                 await update(metaRef, { last_use: roundedNow });
-                console.log("[room] meta.last_use actualizado");
             }
 
             await startWebRTC();
         }
 
-        // ── WebRTC ────────────────────────────────────────────────────
+        // ── WebRTC: host/client election ──────────────────────────────
         async function startWebRTC() {
-            // Usar la lista de iceServers.js (global expuesta por el <script>)
-            pc = new RTCPeerConnection({ iceServers: window.iceServers });
-            console.log("[PC] RTCPeerConnection creada con", window.iceServers?.[0]?.urls?.length ?? 0, "STUN URLs");
-
-            pc.onicecandidate = async e => {
-                if (e.candidate) {
-                    const role = isCaller ? "A" : "B";
-                    console.log(`[ICE] candidato local (${role}):`, e.candidate.candidate);
-                    const enc = await encryptVal(roomKey, { from: role, candidate: e.candidate.toJSON() });
-                    push(ref(db, `rooms/${roomId}/candidates`), enc);
-                } else {
-                    console.log("[ICE] gathering completo");
-                }
-            };
-
-            pc.onicegatheringstatechange = () =>
-                console.log("[ICE] gatheringState →", pc.iceGatheringState);
-
-            pc.oniceconnectionstatechange = () =>
-                console.log("[ICE] iceConnectionState →", pc.iceConnectionState);
-
-            pc.onconnectionstatechange = () => {
-                const s = pc.connectionState;
-                console.log("[PC] connectionState →", s);
-                setStatus(s, s === "connected");
-
-                if (s === "connected") {
-                    log("🟢 conectado");
-                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-                    // Borrar candidates de Firebase — ya no hacen falta y contienen IPs.
-                    remove(ref(db, `rooms/${roomId}/candidates`));
-                }
-
-                if (s === "failed") {
-                    log("🔴 conexión fallida — reconectando...");
-                    scheduleReconnect(500);
-                }
-
-                if (s === "disconnected") {
-                    // "disconnected" puede ser transitorio (network blip),
-                    // esperamos 4s antes de reiniciar por si se recupera solo.
-                    log("🟡 el otro se desconectó — esperando...");
-                    scheduleReconnect(4000);
-                }
-            };
-
-            pc.ondatachannel = e => {
-                console.log("[DC] ondatachannel:", e.channel.label);
-
-                if (e.channel.label === "chat") {
-                    // Existing chat + drawing channel.
-                    dc = e.channel;
-                    setupDC();
-
-                } else if (e.channel.label === "game") {
-                    // Dedicated game channel — set binaryType before onopen
-                    // so incoming ArrayBuffers are not wrapped in Blobs.
-                    gameDc = e.channel;
-                    gameDc.binaryType = "arraybuffer";
-                    gameDc.onopen = () => {
-                        console.log("[Game DC] open (client)");
-                        initGame(gameDc, gameContainer, false);
-                    };
-                }
-            };
-
-            // Registrar listener de candidatos ANTES de la negociación
-            // para no perder candidatos que lleguen durante el handshake
-            if (candidatesUnsub) candidatesUnsub();
-            candidatesUnsub = onChildAdded(ref(db, `rooms/${roomId}/candidates`), async snap => {
-                let data;
-                try { data = await decryptVal(roomKey, snap.val()); }
-                catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
-                const expectedFrom = isCaller ? "B" : "A";
-                if (data.from !== expectedFrom) return;
-                console.log(`[ICE] candidato remoto (from=${data.from}):`, data.candidate?.candidate);
-                pendingCandidates.push(data.candidate);
-                flushCandidates();
-            });
-
-            // ── Detectar lock stale: si callerClaimed tiene un ID que ya no
-            //    está en presencia, el caller anterior desconectó sin limpiar.
-            const lockR = ref(db, `rooms/${roomId}/callerClaimed`);
+            const lockR    = ref(db, `rooms/${roomId}/callerClaimed`);
             const [lockSnap, presSnap] = await Promise.all([
                 get(lockR),
                 get(ref(db, `rooms/${roomId}/presence`)),
             ]);
             const lockedById = lockSnap.val();
-            const presence = presSnap.val() || {};
+            const presence   = presSnap.val() || {};
 
+            // Remove stale lock left by a previous host that disconnected without cleanup.
             if (lockedById && !presence[lockedById]) {
                 console.log(`[join] lock stale (${lockedById} ya no está), limpiando sala...`);
                 await Promise.all([
                     remove(lockR),
-                    remove(ref(db, `rooms/${roomId}/offer`)),
-                    remove(ref(db, `rooms/${roomId}/answer`)),
-                    remove(ref(db, `rooms/${roomId}/candidates`)),
+                    remove(ref(db, `rooms/${roomId}/connections`)),
                 ]);
             }
 
-            // Transacción atómica: guardamos nuestro myId para poder detectar
-            // si somos nosotros los que nos fuimos sin limpiar (stale detection).
             console.log("[join] intentando reclamar rol de caller...");
             const tx = await runTransaction(lockR, current => {
-                if (current === null) return myId; // reclamo con mi ID
-                return;                            // ya reclamado, aborto
+                if (current === null) return myId;
+                return; // abort — already claimed
             });
             console.log("[join] transacción committed:", tx.committed);
 
             if (tx.committed) {
-                // ─── SOY A (caller) ───────────────────────────────────
+                // ─── SOY HOST (caller / A) ────────────────────────────
                 isCaller = true;
-                console.log("[join] soy A — creando offer");
+                console.log("[join] soy HOST");
 
-                // Cuando A cierre la pestaña, Firebase limpia todo el estado
-                // de señalización para que la próxima sesión arranque limpia.
+                // When this tab closes, Firebase removes the lock and all signaling.
                 onDisconnect(lockR).remove();
-                onDisconnect(ref(db, `rooms/${roomId}/offer`)).remove();
-                onDisconnect(ref(db, `rooms/${roomId}/answer`)).remove();
-                onDisconnect(ref(db, `rooms/${roomId}/candidates`)).remove();
+                onDisconnect(ref(db, `rooms/${roomId}/connections`)).remove();
 
-                dc = pc.createDataChannel("chat");
-                console.log("[DC] createDataChannel('chat')");
-                setupDC();
+                // Start the game panel immediately (no DC needed yet).
+                initGameHost(gameContainer);
 
-                // Second channel dedicated to the game — keeps game binary
-                // traffic completely separate from chat/drawing messages.
-                gameDc = pc.createDataChannel("game");
-                gameDc.binaryType = "arraybuffer";
-                gameDc.onopen = () => {
-                    console.log("[Game DC] open (host)");
-                    initGame(gameDc, gameContainer, true);
-                };
-                console.log("[DC] createDataChannel('game')");
+                // Watch for new clients joining presence — open a PeerConnection per client.
+                presenceAddedUnsub = onChildAdded(ref(db, `rooms/${roomId}/presence`), snap => {
+                    const clientId = snap.key;
+                    if (clientId === myId) return; // skip self
+                    connectToClient(clientId);
+                });
 
-                // Pre-negociar video y audio: los transceivers quedan en el SDP
-                // desde el primer offer, así replaceTrack funciona sin renegociación.
-                pc.addTransceiver("video", { direction: "sendrecv" });
-                pc.addTransceiver("audio", { direction: "sendrecv" });
-
-                initMedia(pc, mediaContainer);
-
-                let negotiationSeq = 0;
-                let lastAnswerSeq  = 0;
-
-                // onnegotiationneeded crea el offer inicial (disparado por
-                // createDataChannel + addTransceiver) y maneja renegociaciones futuras.
-                pc.onnegotiationneeded = async () => {
-                    if (pc.signalingState !== "stable") return;
-                    negotiationSeq++;
-                    const seq = negotiationSeq;
-                    console.log(`[SDP] onnegotiationneeded (seq=${seq})`);
-                    try {
-                        const offer    = await pc.createOffer();
-                        await pc.setLocalDescription(offer);
-                        const encOffer = await encryptVal(roomKey, { type: offer.type, sdp: offer.sdp, seq });
-                        await set(ref(db, `rooms/${roomId}/offer`), encOffer);
-                        console.log(`[Firebase] offer subido cifrado (seq=${seq})`);
-                    } catch (e) {
-                        console.error("[SDP] onnegotiationneeded error:", e);
-                    }
-                };
-
-                // Escuchar answer de B — seq-based para soportar renegociación
-                onValue(ref(db, `rooms/${roomId}/answer`), async snap => {
-                    if (!snap.exists()) return;
-                    let type, sdp, seq;
-                    try {
-                        ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val()));
-                    } catch (e) { console.warn("[Firebase] no se pudo descifrar answer:", e); return; }
-                    if (seq <= lastAnswerSeq) return;
-                    lastAnswerSeq = seq;
-                    console.log(`[Firebase] answer descifrado (seq=${seq}) → setRemoteDescription...`);
-                    try {
-                        await pc.setRemoteDescription({ type, sdp });
-                        console.log("[SDP] setRemoteDescription(answer) OK");
-                        await flushCandidates();
-                    } catch (e) {
-                        console.error("[SDP] setRemoteDescription(answer) ERROR:", e);
-                    }
+                // Watch for clients leaving — remove them from the game.
+                presenceRemovedUnsub = onChildRemoved(ref(db, `rooms/${roomId}/presence`), snap => {
+                    const clientId = snap.key;
+                    if (clientId === myId) return;
+                    console.log(`[presence] ${clientId} salió`);
+                    removeGamePeer(clientId);
+                    closePeer(clientId);
                 });
 
             } else {
-                // ─── SOY B (callee) ───────────────────────────────────
-                console.log("[join] soy B — esperando offer...");
+                // ─── SOY CLIENT (callee / B) ──────────────────────────
+                console.log("[join] soy CLIENT — esperando offer en connections/" + myId);
 
-                // initMedia DEBE ir antes del primer setRemoteDescription:
-                // ontrack se dispara durante setRemoteDescription y necesita
-                // el handler ya instalado para capturar el stream remoto.
-                initMedia(pc, mediaContainer);
+                clientPc = new RTCPeerConnection({ iceServers: window.iceServers });
 
+                clientPc.onicecandidate = async e => {
+                    if (!e.candidate) return;
+                    const enc = await encryptVal(roomKey, { from: "client", candidate: e.candidate.toJSON() });
+                    push(ref(db, `rooms/${roomId}/connections/${myId}/candidates`), enc);
+                };
+
+                clientPc.onicegatheringstatechange = () =>
+                    console.log("[ICE] gatheringState →", clientPc.iceGatheringState);
+
+                clientPc.oniceconnectionstatechange = () =>
+                    console.log("[ICE] iceConnectionState →", clientPc.iceConnectionState);
+
+                clientPc.onconnectionstatechange = () => {
+                    const s = clientPc.connectionState;
+                    console.log("[PC] connectionState →", s);
+                    setStatus(s, s === "connected");
+
+                    if (s === "connected") {
+                        log("🟢 conectado");
+                        if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                        remove(ref(db, `rooms/${roomId}/connections/${myId}/candidates`));
+                    }
+                    if (s === "failed") {
+                        log("🔴 conexión fallida — reconectando...");
+                        scheduleReconnect(500);
+                    }
+                    if (s === "disconnected") {
+                        log("🟡 el otro se desconectó — esperando...");
+                        scheduleReconnect(4000);
+                    }
+                };
+
+                // Route incoming data channels to the right handler.
+                clientPc.ondatachannel = e => {
+                    console.log("[DC] ondatachannel:", e.channel.label);
+                    if (e.channel.label === "chat") {
+                        dc = e.channel;
+                        setupDC();
+                    } else if (e.channel.label === "game") {
+                        clientGameDc = e.channel;
+                        clientGameDc.binaryType = "arraybuffer";
+                        clientGameDc.onopen = () => {
+                            console.log("[Game DC] open (client)");
+                            initGameClient(clientGameDc, gameContainer);
+                        };
+                    }
+                };
+
+                // initMedia must be called before setRemoteDescription so ontrack
+                // is already registered when the offer is processed.
+                initMedia(clientPc, mediaContainer);
+
+                // Listen for ICE candidates sent by the host.
+                clientCandidatesUnsub = onChildAdded(
+                    ref(db, `rooms/${roomId}/connections/${myId}/candidates`),
+                    async snap => {
+                        let data;
+                        try { data = await decryptVal(roomKey, snap.val()); }
+                        catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
+                        if (data.from !== "host") return;
+                        clientPendingCandidates.push(data.candidate);
+                        flushClientCandidates();
+                    }
+                );
+
+                // Wait for the host's offer.
                 let lastOfferSeq = 0;
+                onValue(ref(db, `rooms/${roomId}/connections/${myId}/offer`), async snap => {
+                    if (!snap.exists()) return;
+                    let type, sdp, seq;
+                    try { ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val())); }
+                    catch (e) { console.warn("[Firebase] no se pudo descifrar offer:", e); return; }
+                    if (seq <= lastOfferSeq) return;
+                    lastOfferSeq = seq;
+                    console.log(`[Firebase] offer descifrado (seq=${seq}) → setRemoteDescription...`);
+                    try {
+                        await clientPc.setRemoteDescription({ type, sdp });
+                        console.log("[SDP] setRemoteDescription(offer) OK");
+                        await flushClientCandidates();
 
-                await new Promise(resolve => {
-                    let resolved = false;
-                    onValue(ref(db, `rooms/${roomId}/offer`), async snap => {
-                        if (!snap.exists()) return;
-                        let type, sdp, seq;
-                        try {
-                            ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val()));
-                        } catch (e) { console.warn("[Firebase] no se pudo descifrar offer:", e); return; }
-                        if (seq <= lastOfferSeq) return;
-                        lastOfferSeq = seq;
-                        console.log(`[Firebase] offer descifrado (seq=${seq}) → setRemoteDescription...`);
-                        try {
-                            await pc.setRemoteDescription({ type, sdp });
-                            console.log("[SDP] setRemoteDescription(offer) OK");
-                            await flushCandidates();
-
-                            // Forzar sendrecv en todos los transceivers para que B
-                            // también pueda enviar media (Chrome puede generar recvonly
-                            // si no hay track asignado al sender todavía).
-                            for (const t of pc.getTransceivers()) {
-                                if (t.direction === "recvonly") t.direction = "sendrecv";
-                            }
-
-                            const answer    = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-                            console.log("[SDP] setLocalDescription(answer)");
-                            const encAnswer = await encryptVal(roomKey, { type: answer.type, sdp: answer.sdp, seq });
-                            await set(ref(db, `rooms/${roomId}/answer`), encAnswer);
-                            console.log(`[Firebase] answer subido cifrado (seq=${seq})`);
-
-                            if (!resolved) { resolved = true; resolve(); }
-                        } catch (e) {
-                            console.error("[SDP] error procesando offer:", e);
+                        // Ensure sendrecv so the client can also send media.
+                        for (const t of clientPc.getTransceivers()) {
+                            if (t.direction === "recvonly") t.direction = "sendrecv";
                         }
-                    });
+
+                        const answer    = await clientPc.createAnswer();
+                        await clientPc.setLocalDescription(answer);
+                        console.log("[SDP] setLocalDescription(answer)");
+                        const encAnswer = await encryptVal(roomKey, { type: answer.type, sdp: answer.sdp, seq });
+                        await set(ref(db, `rooms/${roomId}/connections/${myId}/answer`), encAnswer);
+                        console.log(`[Firebase] answer subido cifrado (seq=${seq})`);
+                    } catch (e) {
+                        console.error("[SDP] error procesando offer:", e);
+                    }
                 });
             }
         }
 
-        // ── Helpers WebRTC ────────────────────────────────────────────
+        // ── connectToClient (host only) ───────────────────────────────
+        /**
+         * Open a dedicated RTCPeerConnection to one client.
+         * The first connected client also gets media (video/audio) and the
+         * chat-drawing module; subsequent clients get only the game channel.
+         *
+         * @param {string} clientId - Firebase presence key for this client.
+         */
+        async function connectToClient(clientId) {
+            if (peerMap.has(clientId)) return;
 
+            const isFirstPeer = peerMap.size === 0;
+            const peerPc      = new RTCPeerConnection({ iceServers: window.iceServers });
+            const peer        = {
+                pc: peerPc,
+                dc: null,
+                gameDc: null,
+                pendingCandidates: [],
+                candidatesUnsub: null,
+            };
+            peerMap.set(clientId, peer);
+            console.log(`[Host] connecting to ${clientId} (first=${isFirstPeer})`);
+
+            // ICE: send our candidates to the client's Firebase path.
+            peerPc.onicecandidate = async e => {
+                if (!e.candidate) return;
+                const enc = await encryptVal(roomKey, { from: "host", candidate: e.candidate.toJSON() });
+                push(ref(db, `rooms/${roomId}/connections/${clientId}/candidates`), enc);
+            };
+
+            peerPc.onicegatheringstatechange = () =>
+                console.log(`[ICE:${clientId}] gatheringState →`, peerPc.iceGatheringState);
+
+            peerPc.onconnectionstatechange = () => {
+                const s = peerPc.connectionState;
+                console.log(`[PC:${clientId}] connectionState →`, s);
+                if (s === "connected") {
+                    if (isFirstPeer) { setStatus(s, true); log("🟢 conectado"); }
+                    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+                    remove(ref(db, `rooms/${roomId}/connections/${clientId}/candidates`));
+                }
+                if (s === "failed") {
+                    console.warn(`[PC:${clientId}] failed — removing peer`);
+                    removeGamePeer(clientId);
+                    closePeer(clientId);
+                }
+                if (s === "disconnected" && isFirstPeer) {
+                    // Only schedule reconnect for the first (primary) peer.
+                    // Additional peers are simply removed when they leave presence.
+                    log("🟡 el otro se desconectó — esperando...");
+                    scheduleReconnect(4000);
+                }
+            };
+
+            // ── Data channels ───────────────────────────────────────
+            peer.dc = peerPc.createDataChannel("chat");
+            if (isFirstPeer) {
+                dc = peer.dc; // expose as primary DC for send() / drawing
+                setupDC();
+            } else {
+                // Basic handlers for non-primary peers.
+                peer.dc.onclose = () => {};
+                peer.dc.onerror = e => console.error(`[DC:${clientId}] error:`, e);
+                peer.dc.onmessage = e => {
+                    if (typeof e.data === "string") log("📩 " + e.data);
+                };
+            }
+
+            peer.gameDc = peerPc.createDataChannel("game");
+            peer.gameDc.binaryType = "arraybuffer";
+            peer.gameDc.onopen = () => {
+                console.log(`[Game DC] open (host→${clientId})`);
+                addGamePeer(clientId, peer.gameDc);
+            };
+
+            // ── Media — only for the first connected client ─────────
+            if (isFirstPeer) {
+                // Pre-negotiate sendrecv transceivers so replaceTrack works
+                // without renegotiation.
+                peerPc.addTransceiver("video", { direction: "sendrecv" });
+                peerPc.addTransceiver("audio", { direction: "sendrecv" });
+                initMedia(peerPc, mediaContainer);
+            }
+
+            // ── SDP negotiation ─────────────────────────────────────
+            let negotiationSeq = 0;
+            let lastAnswerSeq  = 0;
+
+            peerPc.onnegotiationneeded = async () => {
+                if (peerPc.signalingState !== "stable") return;
+                negotiationSeq++;
+                const seq = negotiationSeq;
+                console.log(`[SDP:${clientId}] onnegotiationneeded (seq=${seq})`);
+                try {
+                    const offer    = await peerPc.createOffer();
+                    await peerPc.setLocalDescription(offer);
+                    const encOffer = await encryptVal(roomKey, { type: offer.type, sdp: offer.sdp, seq });
+                    await set(ref(db, `rooms/${roomId}/connections/${clientId}/offer`), encOffer);
+                    console.log(`[Firebase] offer subido para ${clientId} (seq=${seq})`);
+                } catch (e) {
+                    console.error(`[SDP:${clientId}] onnegotiationneeded error:`, e);
+                }
+            };
+
+            // Listen for this client's answer.
+            onValue(ref(db, `rooms/${roomId}/connections/${clientId}/answer`), async snap => {
+                if (!snap.exists()) return;
+                let type, sdp, seq;
+                try { ({ type, sdp, seq = 1 } = await decryptVal(roomKey, snap.val())); }
+                catch (e) { console.warn(`[Firebase] no se pudo descifrar answer de ${clientId}:`, e); return; }
+                if (seq <= lastAnswerSeq) return;
+                lastAnswerSeq = seq;
+                console.log(`[Firebase] answer de ${clientId} (seq=${seq}) → setRemoteDescription...`);
+                try {
+                    await peerPc.setRemoteDescription({ type, sdp });
+                    console.log(`[SDP:${clientId}] setRemoteDescription(answer) OK`);
+                    flushPeerCandidates(peerPc, peer.pendingCandidates);
+                } catch (e) {
+                    console.error(`[SDP:${clientId}] setRemoteDescription(answer) ERROR:`, e);
+                }
+            });
+
+            // Listen for ICE candidates from this client.
+            peer.candidatesUnsub = onChildAdded(
+                ref(db, `rooms/${roomId}/connections/${clientId}/candidates`),
+                async snap => {
+                    let data;
+                    try { data = await decryptVal(roomKey, snap.val()); }
+                    catch (e) { console.warn("[ICE] no se pudo descifrar candidato:", e); return; }
+                    if (data.from !== "client") return;
+                    peer.pendingCandidates.push(data.candidate);
+                    flushPeerCandidates(peerPc, peer.pendingCandidates);
+                }
+            );
+        }
+
+        // ── Peer cleanup ──────────────────────────────────────────────
+        function closePeer(clientId) {
+            const peer = peerMap.get(clientId);
+            if (!peer) return;
+            if (peer.candidatesUnsub) peer.candidatesUnsub();
+            try { peer.pc.close(); } catch (_) {}
+            peerMap.delete(clientId);
+            console.log(`[Host] peer ${clientId} closed`);
+        }
+
+        function flushPeerCandidates(peerPc, queue) {
+            if (!peerPc.remoteDescription) return;
+            while (queue.length) {
+                const init = queue.shift();
+                if (!init?.candidate) continue;
+                const patched = { ...init };
+                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
+                peerPc.addIceCandidate(patched).catch(e => console.error("[ICE] addIceCandidate ERROR:", e));
+            }
+        }
+
+        // ── Client candidate flush ────────────────────────────────────
+        async function flushClientCandidates() {
+            if (!clientPc || !clientPc.remoteDescription) return;
+            while (clientPendingCandidates.length) {
+                const init = clientPendingCandidates.shift();
+                if (!init?.candidate) continue;
+                const patched = { ...init };
+                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
+                try { await clientPc.addIceCandidate(patched); }
+                catch (e) { console.error("[ICE] addIceCandidate ERROR:", e); }
+            }
+        }
+
+        // ── Reconnect (client / first peer only) ──────────────────────
         async function scheduleReconnect(delayMs) {
             if (reconnectTimer) clearTimeout(reconnectTimer);
             reconnectTimer = setTimeout(async () => {
                 reconnectTimer = null;
-                if (!roomId) return; // ya salimos de la sala
+                if (!roomId) return;
                 console.log("[reconnect] reiniciando WebRTC...");
                 log("↻ reconectando...");
                 destroyMedia();
                 destroyGame();
-                if (pc) { pc.close(); pc = null; }
-                if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
-                pendingCandidates = [];
+
+                if (isCaller) {
+                    // Host: tear down all peer connections.
+                    if (presenceAddedUnsub)   { presenceAddedUnsub();   presenceAddedUnsub   = null; }
+                    if (presenceRemovedUnsub) { presenceRemovedUnsub(); presenceRemovedUnsub = null; }
+                    for (const { pc: peerPc, candidatesUnsub } of peerMap.values()) {
+                        if (candidatesUnsub) candidatesUnsub();
+                        try { peerPc.close(); } catch (_) {}
+                    }
+                    peerMap.clear();
+                } else {
+                    // Client: tear down the single connection.
+                    if (clientCandidatesUnsub) { clientCandidatesUnsub(); clientCandidatesUnsub = null; }
+                    if (clientPc) { clientPc.close(); clientPc = null; }
+                    clientPendingCandidates = [];
+                }
+
+                dc = null;
                 isCaller = false;
                 await startWebRTC();
             }, delayMs);
         }
 
-        const drawingContainer = document.getElementById("drawing-container");
-        const mediaContainer   = document.getElementById("media-container");
-        const gameContainer    = document.getElementById("game-container");
-
+        // ── Chat data channel setup ───────────────────────────────────
+        // Uses the module-level `dc` variable; call after dc is assigned.
         function setupDC() {
             dc.onopen = () => {
                 console.log("[DC] open!");
                 log("🟢 conectado");
-                // Inicializar el módulo de dibujo cuando el canal esté listo
-                destroyDrawing(); // limpiar instancia anterior si existía
+                destroyDrawing();
                 initDrawing(dc, drawingContainer);
             };
             dc.onclose = () => { console.log("[DC] closed"); };
             dc.onerror = e => console.error("[DC] error:", e);
-            // Solo mostrar en el chat los mensajes de texto; los binarios los maneja drawing.js
             dc.onmessage = e => {
                 if (typeof e.data === "string") {
                     console.log("[DC] mensaje:", e.data);
@@ -483,24 +613,43 @@
             };
         }
 
-        async function flushCandidates() {
-            if (!pc || !pc.remoteDescription) {
-                console.log(`[ICE] flush diferido — sin remoteDescription (${pendingCandidates.length} en cola)`);
-                return;
-            }
-            console.log(`[ICE] flush — procesando ${pendingCandidates.length} candidatos`);
-            while (pendingCandidates.length) {
-                const init = pendingCandidates.shift();
-                if (!init || !init.candidate) continue;
-                const patched = { ...init };
-                if (patched.sdpMLineIndex == null && patched.sdpMid == null) patched.sdpMLineIndex = 0;
-                try {
-                    await pc.addIceCandidate(patched);
-                    console.log("[ICE] addIceCandidate OK");
-                } catch (e) {
-                    console.error("[ICE] addIceCandidate ERROR:", e);
+        // ── Leave room ────────────────────────────────────────────────
+        async function leaveRoom() {
+            destroyMedia();
+            destroyDrawing();
+            destroyGame();
+
+            if (isCaller) {
+                if (presenceAddedUnsub)   { presenceAddedUnsub();   presenceAddedUnsub   = null; }
+                if (presenceRemovedUnsub) { presenceRemovedUnsub(); presenceRemovedUnsub = null; }
+                for (const { pc: peerPc, candidatesUnsub } of peerMap.values()) {
+                    if (candidatesUnsub) candidatesUnsub();
+                    try { peerPc.close(); } catch (_) {}
                 }
+                peerMap.clear();
+            } else {
+                if (clientCandidatesUnsub) { clientCandidatesUnsub(); clientCandidatesUnsub = null; }
+                if (clientPc) { clientPc.close(); clientPc = null; }
+                clientPendingCandidates = [];
             }
+
+            dc = null;
+
+            if (roomId) {
+                await Promise.all([
+                    remove(ref(db, `rooms/${roomId}/presence/${myId}`)),
+                    remove(ref(db, `rooms/${roomId}/callerClaimed`)),
+                    isCaller
+                        ? remove(ref(db, `rooms/${roomId}/connections`))
+                        : remove(ref(db, `rooms/${roomId}/connections/${myId}`)),
+                ]);
+            }
+
+            roomId   = null;
+            isCaller = false;
+            roomViewEl.hidden = true;
+            lobbyEl.hidden    = false;
+            cleanupOldRooms();
         }
 
         // ── UI helpers ────────────────────────────────────────────────
@@ -509,15 +658,15 @@
 
         function timeAgo(ts) {
             const diff = Date.now() - ts;
-            if (diff < 60_000) return "hace menos de 1 min";
-            if (diff < 3_600_000) return `hace ${Math.floor(diff / 60_000)} min`;
+            if (diff < 60_000)     return "hace menos de 1 min";
+            if (diff < 3_600_000)  return `hace ${Math.floor(diff / 60_000)} min`;
             if (diff < 86_400_000) return `hace ${Math.floor(diff / 3_600_000)}h`;
             return `hace ${Math.floor(diff / 86_400_000)}d`;
         }
 
         function setStatus(text, connected) {
             statusEl.textContent = text;
-            statusEl.className = connected ? "connected" : "";
+            statusEl.className   = connected ? "connected" : "";
         }
 
         function send() {
@@ -528,30 +677,6 @@
             } else {
                 log("⚠️ no conectado");
             }
-        }
-
-        async function leaveRoom() {
-            destroyMedia();
-            destroyDrawing();
-            destroyGame();
-            if (pc) { pc.close(); pc = null; }
-            if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
-            if (roomId) {
-                // Siempre limpiar presencia y todo el estado de señalización,
-                // sin importar si somos A o B, para que el próximo usuario entre limpio.
-                await Promise.all([
-                    remove(ref(db, `rooms/${roomId}/presence/${myId}`)),
-                    remove(ref(db, `rooms/${roomId}/callerClaimed`)),
-                    remove(ref(db, `rooms/${roomId}/offer`)),
-                    remove(ref(db, `rooms/${roomId}/answer`)),
-                    remove(ref(db, `rooms/${roomId}/candidates`)),
-                ]);
-            }
-            roomId = null;
-            isCaller = false;
-            roomViewEl.hidden = true;
-            lobbyEl.hidden = false;
-            cleanupOldRooms();
         }
 
         // ── Event listeners ───────────────────────────────────────────
