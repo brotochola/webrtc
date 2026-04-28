@@ -478,6 +478,87 @@ button.action.active:hover {
     background: rgba(239, 68, 68, 0.8);
 }
 
+/* ── Game module ──────────────────────────────────────────────────────── */
+
+/*
+ * Outer container. Matches the same border/radius/overflow pattern used
+ * by #drawing-container so the panel blends into the room layout.
+ */
+#game-container {
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+/* Flex column that stacks header, canvas, and legend. */
+.game-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    background: var(--surface);
+}
+
+/* Header row — mirrors .drawing-toolbar */
+.game-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 14px;
+    flex-wrap: wrap;
+}
+
+.game-panel-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.02em;
+}
+
+/* Small keyboard hint that fades in the background */
+.game-panel-hint {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+}
+
+/* The canvas stretches to fill the available width while preserving its
+   intrinsic 600×380 aspect ratio. touch-action: none prevents scroll
+   interference when arrow keys are captured. */
+.game-canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    background: #0f1923; /* matches the canvas clear colour */
+}
+
+/* Legend row below the canvas */
+.game-panel-legend {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 24px;
+    padding: 7px 14px;
+    background: var(--surface-2);
+    border-top: 1px solid var(--border);
+}
+
+.game-legend-host,
+.game-legend-client {
+    font-size: 0.75rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
 /* ── Drawing module ───────────────────────────────────────────────────── */
 .drawing-wrap {
     display: flex;

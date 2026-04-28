@@ -41,6 +41,9 @@
         <!-- Canvas de dibujo colaborativo -->
         <div id="drawing-container"></div>
 
+        <!-- Panel del juego multijugador -->
+        <div id="game-container"></div>
+
         <pre id="log"></pre>
         <div class="send-row">
             <input id="msg" placeholder="Escribí un mensaje…">
@@ -54,6 +57,7 @@
     <script type="module">
         import { initDrawing, destroyDrawing } from "./drawing.js";
         import { initMedia, destroyMedia }     from "./media.js";
+        import { initGame,  destroyGame }      from "./game.js";
         import { deriveRoomKey, encryptVal, decryptVal } from "./crypto-utils.js";
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import {
@@ -89,7 +93,7 @@
         const msgInput = document.getElementById("msg");
 
         // ── State ────────────────────────────────────────────────────
-        let pc, dc, roomId, roomKey, isCaller;
+        let pc, dc, gameDc, roomId, roomKey, isCaller;
         let pendingCandidates = [];
         let candidatesUnsub = null;
         let reconnectTimer = null;
@@ -253,8 +257,22 @@
 
             pc.ondatachannel = e => {
                 console.log("[DC] ondatachannel:", e.channel.label);
-                dc = e.channel;
-                setupDC();
+
+                if (e.channel.label === "chat") {
+                    // Existing chat + drawing channel.
+                    dc = e.channel;
+                    setupDC();
+
+                } else if (e.channel.label === "game") {
+                    // Dedicated game channel — set binaryType before onopen
+                    // so incoming ArrayBuffers are not wrapped in Blobs.
+                    gameDc = e.channel;
+                    gameDc.binaryType = "arraybuffer";
+                    gameDc.onopen = () => {
+                        console.log("[Game DC] open (client)");
+                        initGame(gameDc, gameContainer, false);
+                    };
+                }
             };
 
             // Registrar listener de candidatos ANTES de la negociación
@@ -315,6 +333,16 @@
                 dc = pc.createDataChannel("chat");
                 console.log("[DC] createDataChannel('chat')");
                 setupDC();
+
+                // Second channel dedicated to the game — keeps game binary
+                // traffic completely separate from chat/drawing messages.
+                gameDc = pc.createDataChannel("game");
+                gameDc.binaryType = "arraybuffer";
+                gameDc.onopen = () => {
+                    console.log("[Game DC] open (host)");
+                    initGame(gameDc, gameContainer, true);
+                };
+                console.log("[DC] createDataChannel('game')");
 
                 // Pre-negociar video y audio: los transceivers quedan en el SDP
                 // desde el primer offer, así replaceTrack funciona sin renegociación.
@@ -423,6 +451,7 @@
                 console.log("[reconnect] reiniciando WebRTC...");
                 log("↻ reconectando...");
                 destroyMedia();
+                destroyGame();
                 if (pc) { pc.close(); pc = null; }
                 if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
                 pendingCandidates = [];
@@ -433,6 +462,7 @@
 
         const drawingContainer = document.getElementById("drawing-container");
         const mediaContainer   = document.getElementById("media-container");
+        const gameContainer    = document.getElementById("game-container");
 
         function setupDC() {
             dc.onopen = () => {
@@ -503,6 +533,7 @@
         async function leaveRoom() {
             destroyMedia();
             destroyDrawing();
+            destroyGame();
             if (pc) { pc.close(); pc = null; }
             if (candidatesUnsub) { candidatesUnsub(); candidatesUnsub = null; }
             if (roomId) {
