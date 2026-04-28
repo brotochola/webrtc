@@ -12,7 +12,7 @@
  *   4. Captures the host's own keyboard input via an InputHandler instance.
  */
 
-import { Player, POS_X, POS_Y } from "./game-physics.js";
+import { Player, POS_X, POS_Y, VEL_X, VEL_Y } from "./game-physics.js";
 import { InputHandler } from "./game-input.js";
 import { ARENA_W, ARENA_H } from "./game-renderer.js";
 
@@ -75,15 +75,15 @@ export class GameHost {
     /**
      * Persistent send buffer — never reallocated after construction.
      *
-     * Layout (Float32, 6 elements = 24 bytes):
+     * Layout (Float32 × 10 = 40 bytes):
      *   [0] frameNo      — monotonic frame counter (cast to f32, exact up to 2²⁴)
      *   [1] timestamp_ms — performance.now() from the rAF callback
-     *   [2] hostX
-     *   [3] hostY
-     *   [4] clientX
-     *   [5] clientY
+     *   [2] hostX        [3] hostY
+     *   [4] clientX      [5] clientY
+     *   [6] hostVX       [7] hostVY    ← velocities for dead reckoning on client
+     *   [8] clientVX     [9] clientVY
      */
-    this._posBuf = new Float32Array(6);
+    this._posBuf = new Float32Array(10);
 
     // Monotonic frame counter; used both for the send-throttle and the packet header.
     this._frameCount = 0;
@@ -163,18 +163,18 @@ export class GameHost {
   // ─── Private — network ───────────────────────────────────────────────────
 
   /**
-   * Write the current frame header + both players' positions into the
-   * persistent _posBuf and send it as-is — zero allocations per call.
+   * Write the current frame header + both players' positions and velocities
+   * into the persistent _posBuf and send it as-is — zero allocations per call.
    *
-   * Packet layout (Float32 × 6 = 24 bytes):
-   *   [0] frameNo      monotonic counter
-   *   [1] timestamp_ms performance.now() from the rAF callback
-   *   [2] hostX
-   *   [3] hostY
-   *   [4] clientX
-   *   [5] clientY
+   * Packet layout (Float32 × 10 = 40 bytes):
+   *   [0] frameNo      [1] timestamp_ms
+   *   [2] hostX        [3] hostY
+   *   [4] clientX      [5] clientY
+   *   [6] hostVX       [7] hostVY
+   *   [8] clientVX     [9] clientVY
    *
-   * Reads positions from the SoA arrays (POS_X / POS_Y) directly by entity ID.
+   * Velocities let the client extrapolate positions between packets
+   * (dead reckoning), producing smooth motion without extra network traffic.
    *
    * @param {number} now - DOMHighResTimeStamp forwarded from _loop().
    * @private
@@ -191,6 +191,10 @@ export class GameHost {
     this._posBuf[3] = POS_Y[hi];
     this._posBuf[4] = POS_X[ci];
     this._posBuf[5] = POS_Y[ci];
+    this._posBuf[6] = VEL_X[hi];
+    this._posBuf[7] = VEL_Y[hi];
+    this._posBuf[8] = VEL_X[ci];
+    this._posBuf[9] = VEL_Y[ci];
 
     // .buffer is the backing ArrayBuffer of the Float32Array — no copy, no alloc.
     this._dc.send(this._posBuf.buffer);
