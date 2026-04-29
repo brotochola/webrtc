@@ -1,3 +1,5 @@
+import { RtcHost, RtcClient } from "./rtc-transport.js";
+
 export class RTCConnection {
     constructor({ myId, firebase, chat, media, drawing, game, setStatus }) {
         this.myId = myId;
@@ -11,13 +13,14 @@ export class RTCConnection {
         this.roomId = null;
         this.isCaller = false;
         this.reconnectTimer = null;
+        this.hostTransport = null;
+        this.clientTransport = null;
 
         this.peerMap = new Map();
         this.presenceAddedUnsub = null;
         this.presenceRemovedUnsub = null;
 
         this.clientPc = null;
-        this.clientGameDc = null;
         this.clientPendingCandidates = [];
         this.clientCandidatesUnsub = null;
         this.clientOfferUnsub = null;
@@ -43,7 +46,10 @@ export class RTCConnection {
         this.isCaller = true;
         console.log("[join] soy HOST");
 
-        this.game.initHost();
+        this.hostTransport = new RtcHost();
+        this.chat.attachTransport(this.hostTransport);
+        this.drawing.init(this.hostTransport);
+        this.game.initHost(this.hostTransport);
 
         this.presenceAddedUnsub = this.firebase.watchPresenceAdded(this.roomId, clientId => {
             if (clientId === this.myId) return;
@@ -60,6 +66,11 @@ export class RTCConnection {
 
     async startClient() {
         console.log("[join] soy CLIENT - esperando offer en connections/" + this.myId);
+
+        this.clientTransport = new RtcClient();
+        this.chat.attachTransport(this.clientTransport);
+        this.drawing.init(this.clientTransport);
+        this.game.initClient(this.clientTransport);
 
         this.clientPc = this.createPeerConnection();
 
@@ -99,16 +110,8 @@ export class RTCConnection {
 
         this.clientPc.ondatachannel = e => {
             console.log("[DC] ondatachannel:", e.channel.label);
-            if (e.channel.label === "chat") {
-                this.chat.attachPrimaryChannel(e.channel, dc => this.drawing.init(dc));
-            } else if (e.channel.label === "game") {
-                this.clientGameDc = e.channel;
-                this.clientGameDc.binaryType = "arraybuffer";
-                this.clientGameDc.onopen = () => {
-                    console.log("[Game DC] open (client)");
-                    this.game.initClient(this.clientGameDc);
-                };
-            }
+            if (e.channel.label === "reliable") this.clientTransport.setChannel("reliable", e.channel);
+            if (e.channel.label === "fast") this.clientTransport.setChannel("fast", e.channel);
         };
 
         // Media must be ready before setRemoteDescription so ontrack is installed.
@@ -167,8 +170,9 @@ export class RTCConnection {
         const peerPc = this.createPeerConnection();
         const peer = {
             pc: peerPc,
-            dc: null,
-            gameDc: null,
+            reliableDc: null,
+            fastDc: null,
+            transportReady: false,
             pendingCandidates: [],
             candidatesUnsub: null,
             answerUnsub: null,
@@ -202,6 +206,7 @@ export class RTCConnection {
             if (state === "failed") {
                 console.warn(`[PC:${clientId}] failed - removing peer`);
                 this.game.removePeer(clientId);
+                this.hostTransport?.removePeer(clientId);
                 this.closePeer(clientId);
             }
             if (state === "disconnected" && isFirstPeer) {
@@ -210,19 +215,18 @@ export class RTCConnection {
             }
         };
 
-        peer.dc = peerPc.createDataChannel("chat");
-        if (isFirstPeer) {
-            this.chat.attachPrimaryChannel(peer.dc, dc => this.drawing.init(dc));
-        } else {
-            this.chat.attachPassiveChannel(peer.dc, clientId);
-        }
-
-        peer.gameDc = peerPc.createDataChannel("game");
-        peer.gameDc.binaryType = "arraybuffer";
-        peer.gameDc.onopen = () => {
-            console.log(`[Game DC] open (host->${clientId})`);
-            this.game.addPeer(clientId, peer.gameDc);
+        peer.reliableDc = peerPc.createDataChannel("reliable");
+        peer.reliableDc.binaryType = "arraybuffer";
+        peer.reliableDc.onopen = () => {
+            console.log(`[RTC reliable] open (host->${clientId})`);
+            this.registerHostPeer(clientId, peer);
         };
+        peer.reliableDc.onerror = e => console.error(`[RTC reliable:${clientId}] error:`, e);
+
+        peer.fastDc = peerPc.createDataChannel("fast", { ordered: false, maxRetransmits: 0 });
+        peer.fastDc.binaryType = "arraybuffer";
+        peer.fastDc.onopen = () => console.log(`[RTC fast] open (host->${clientId})`);
+        peer.fastDc.onerror = e => console.error(`[RTC fast:${clientId}] error:`, e);
 
         if (isFirstPeer) {
             peerPc.addTransceiver("video", { direction: "sendrecv" });
@@ -293,6 +297,17 @@ export class RTCConnection {
         );
     }
 
+    registerHostPeer(clientId, peer) {
+        if (peer.transportReady) return;
+        if (!this.hostTransport) return;
+        peer.transportReady = true;
+        this.hostTransport.addPeer(clientId, {
+            reliable: peer.reliableDc,
+            fast: peer.fastDc,
+        });
+        this.game.addPeer(clientId);
+    }
+
     createPeerConnection() {
         return new RTCPeerConnection({ iceServers: window.iceServers || [] });
     }
@@ -303,6 +318,7 @@ export class RTCConnection {
 
         if (peer.candidatesUnsub) peer.candidatesUnsub();
         if (peer.answerUnsub) peer.answerUnsub();
+        this.hostTransport?.removePeer(clientId);
         try { peer.pc.close(); } catch (_) {}
         this.peerMap.delete(clientId);
         console.log(`[Host] peer ${clientId} closed`);
@@ -342,6 +358,7 @@ export class RTCConnection {
             console.log("[reconnect] reiniciando WebRTC...");
             this.chat.log("↻ reconectando...");
             this.media.destroy();
+            this.drawing.destroy();
             this.game.destroy();
             this.closeRtcState();
             this.chat.clearChannel();
@@ -383,6 +400,8 @@ export class RTCConnection {
             try { pc.close(); } catch (_) {}
         }
         this.peerMap.clear();
+        this.hostTransport?.destroy();
+        this.hostTransport = null;
 
         if (this.clientCandidatesUnsub) {
             this.clientCandidatesUnsub();
@@ -396,7 +415,8 @@ export class RTCConnection {
             try { this.clientPc.close(); } catch (_) {}
             this.clientPc = null;
         }
-        this.clientGameDc = null;
+        this.clientTransport?.destroy();
+        this.clientTransport = null;
         this.clientPendingCandidates = [];
     }
 

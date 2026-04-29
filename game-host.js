@@ -23,6 +23,7 @@ import {
 } from './game-physics.js';
 import { InputHandler } from './game-input.js';
 import { ARENA_W, ARENA_H } from './game-renderer.js';
+import { RTC_CHANNEL, RTC_MODULE, GAME_MSG } from './rtc-protocol.js';
 
 /** dt cap — prevents huge physics jumps when the tab is backgrounded. */
 const MAX_DT = 0.1;
@@ -59,9 +60,11 @@ const SPAWN_X_FRACS = [0.3, 0.7, 0.2, 0.8, 0.4, 0.6, 0.25, 0.75];
 export class GameHost {
     /**
      * @param {import('./game-renderer.js').GameRenderer} renderer
+     * @param {import('./rtc-transport.js').RtcHost} transport
      */
-    constructor(renderer) {
+    constructor(renderer, transport) {
         this._renderer = renderer;
+        this._transport = transport;
 
         /**
          * Entity 0 — the host's own player.
@@ -77,16 +80,16 @@ export class GameHost {
         /**
          * Per-client peer state.
          * key   = clientId (string, from Firebase presence)
-         * value = { dc, player, entityId, onMessage }
+         * value = { player, entityId }
          *
-         * @type {Map<string, { dc: RTCDataChannel, player: Player, entityId: number, onMessage: Function }>}
+         * @type {Map<string, { player: Player, entityId: number }>}
          */
         this._peers = new Map();
 
         /**
          * Persistent broadcast buffer.
          * Reallocated by _rebuildBroadcastBuffer() whenever a peer joins/leaves.
-         * Layout: [frameNo, timestamp, playerCount, posX₀, posY₀, velX₀, velY₀, posX₁, …]
+         * Layout: [frameNo, timestamp, playerCount, id, posX, posY, velX, velY, …]
          * @type {Float32Array}
          */
         this._posBuf = null;
@@ -108,6 +111,12 @@ export class GameHost {
             this._hostPlayer.setInput(ax, ay);
         });
 
+        this._offInput = this._transport.on(
+            RTC_MODULE.GAME,
+            GAME_MSG.INPUT,
+            (clientId, packet) => this._handleInput(clientId, packet),
+        );
+
         // Draw the initial frame (just the host player) immediately.
         this._render();
     }
@@ -121,19 +130,18 @@ export class GameHost {
     }
 
     /**
-     * Register a new client's game data channel.
+     * Register a new client with the authoritative simulation.
      *
      * Assigns the next available entity ID (1, 2, …), creates a Player,
      * sends a 1-byte setup packet to tell the client its entity ID, and
      * wires up the input-message listener.
      *
-     * @param {string}         clientId - Firebase presence key for this client.
-     * @param {RTCDataChannel} dc       - The open "game" data channel to this client.
+     * @param {string} clientId - Firebase presence key for this client.
      */
-    addPeer(clientId, dc) {
+    addPeer(clientId) {
         if (this._peers.has(clientId)) return; // guard against duplicate calls
 
-        const entityId = this._peers.size + 1; // entity 0 = host, 1+ = clients
+        const entityId = this._nextEntityId(); // entity 0 = host, 1+ = clients
 
         if (entityId >= MAX_ENTITIES) {
             console.warn(`[GameHost] addPeer: reached MAX_ENTITIES (${MAX_ENTITIES}), ignoring ${clientId}`);
@@ -147,13 +155,14 @@ export class GameHost {
             ARENA_H * SPAWN_Y_FRACS[entityId],
         );
 
-        // Tell the client which entity ID it owns — distinguished by byteLength=1.
-        dc.send(new Int8Array([entityId]).buffer);
+        this._transport.sendTo(
+            clientId,
+            RTC_MODULE.GAME,
+            GAME_MSG.SETUP,
+            new Uint8Array([entityId]),
+        );
 
-        const onMessage = this._makeInputHandler(player);
-        dc.addEventListener('message', onMessage);
-
-        this._peers.set(clientId, { dc, player, entityId, onMessage });
+        this._peers.set(clientId, { player, entityId });
         this._rebuildBroadcastBuffer();
         this._updateLegend();
 
@@ -170,7 +179,6 @@ export class GameHost {
         const peer = this._peers.get(clientId);
         if (!peer) return;
 
-        peer.dc.removeEventListener('message', peer.onMessage);
         this._peers.delete(clientId);
         this._rebuildBroadcastBuffer();
         this._updateLegend();
@@ -184,9 +192,8 @@ export class GameHost {
             cancelAnimationFrame(this._rafId);
             this._rafId = null;
         }
-        for (const { dc, onMessage } of this._peers.values()) {
-            dc.removeEventListener('message', onMessage);
-        }
+        if (this._offInput) this._offInput();
+        this._offInput = null;
         this._peers.clear();
         this._input.destroy();
     }
@@ -202,6 +209,14 @@ export class GameHost {
         return [this._hostPlayer, ...Array.from(this._peers.values()).map(p => p.player)];
     }
 
+    _nextEntityId() {
+        const usedIds = new Set(Array.from(this._peers.values()).map(peer => peer.entityId));
+        for (let id = 1; id < MAX_ENTITIES; id++) {
+            if (!usedIds.has(id)) return id;
+        }
+        return MAX_ENTITIES;
+    }
+
     /**
      * (Re)allocate the shared broadcast buffer to fit the current player count.
      * Called whenever a peer joins or leaves.
@@ -210,14 +225,15 @@ export class GameHost {
      *   [0]       frameNo
      *   [1]       timestamp_ms
      *   [2]       playerCount  (N)
-     *   [3+i*4]   POS_X  for entity i
-     *   [4+i*4]   POS_Y  for entity i
-     *   [5+i*4]   VEL_X  for entity i
-     *   [6+i*4]   VEL_Y  for entity i
+     *   [3+i*5]   entity ID
+     *   [4+i*5]   POS_X
+     *   [5+i*5]   POS_Y
+     *   [6+i*5]   VEL_X
+     *   [7+i*5]   VEL_Y
      */
     _rebuildBroadcastBuffer() {
         const n      = 1 + this._peers.size; // host + all clients
-        this._posBuf = new Float32Array(3 + n * 4);
+        this._posBuf = new Float32Array(3 + n * 5);
 
         // Refresh the active-ID list used by the per-frame collision pass.
         this._activeIds = [0, ...Array.from(this._peers.values()).map(p => p.entityId)];
@@ -234,21 +250,10 @@ export class GameHost {
         this._renderer.render(this._allPlayers());
     }
 
-    /**
-     * Create an onmessage handler bound to a specific client's Player.
-     * Reads Int8Array([ax, ay]) input packets and calls setInput().
-     *
-     * @param {Player} player
-     * @returns {(e: MessageEvent) => void}
-     */
-    _makeInputHandler(player) {
-        return (e) => {
-            if (!(e.data instanceof ArrayBuffer)) return;
-            const buf = new Int8Array(e.data);
-            // byteLength === 1 is a setup echo — ignore it
-            if (buf.byteLength !== 2) return;
-            player.setInput(buf[0], buf[1]);
-        };
+    _handleInput(clientId, packet) {
+        const peer = this._peers.get(clientId);
+        if (!peer || packet.payload.byteLength !== 2) return;
+        peer.player.setInput(packet.payload[0] << 24 >> 24, packet.payload[1] << 24 >> 24);
     }
 
     // ─── Private — physics loop ───────────────────────────────────────────────
@@ -302,18 +307,19 @@ export class GameHost {
 
         for (let i = 0; i < n; i++) {
             const id    = players[i].id;
-            const base  = 3 + i * 4;
-            this._posBuf[base]     = POS_X[id];
-            this._posBuf[base + 1] = POS_Y[id];
-            this._posBuf[base + 2] = VEL_X[id];
-            this._posBuf[base + 3] = VEL_Y[id];
+            const base  = 3 + i * 5;
+            this._posBuf[base]     = id;
+            this._posBuf[base + 1] = POS_X[id];
+            this._posBuf[base + 2] = POS_Y[id];
+            this._posBuf[base + 3] = VEL_X[id];
+            this._posBuf[base + 4] = VEL_Y[id];
         }
 
-        // Send to every peer whose channel is open.
-        for (const { dc } of this._peers.values()) {
-            if (dc.readyState === 'open') {
-                dc.send(this._posBuf.buffer);
-            }
-        }
+        this._transport.broadcast(
+            RTC_MODULE.GAME,
+            GAME_MSG.SNAPSHOT,
+            this._posBuf,
+            { channel: RTC_CHANNEL.FAST, tick: this._frameCount },
+        );
     }
 }

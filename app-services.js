@@ -5,22 +5,26 @@ import {
     addGamePeer, removeGamePeer,
     destroyGame,
 } from "./game.js";
+import { RTC_MODULE, CHAT_MSG } from "./rtc-protocol.js";
+
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 export class GameService {
     constructor(containerEl) {
         this.containerEl = containerEl;
     }
 
-    initHost() {
-        initGameHost(this.containerEl);
+    initHost(transport) {
+        initGameHost(this.containerEl, transport);
     }
 
-    initClient(dc) {
-        initGameClient(dc, this.containerEl);
+    initClient(transport) {
+        initGameClient(transport, this.containerEl);
     }
 
-    addPeer(clientId, dc) {
-        addGamePeer(clientId, dc);
+    addPeer(clientId) {
+        addGamePeer(clientId);
     }
 
     removePeer(clientId) {
@@ -51,9 +55,9 @@ export class DrawingService {
         this.containerEl = containerEl;
     }
 
-    init(dc) {
+    init(transport) {
         destroyDrawing();
-        initDrawing(dc, this.containerEl);
+        initDrawing(transport, this.containerEl);
     }
 
     destroy() {
@@ -65,43 +69,40 @@ export class ChatService {
     constructor({ logEl, msgInput }) {
         this.logEl = logEl;
         this.msgInput = msgInput;
-        this.dc = null;
+        this.transport = null;
+        this.offMessage = null;
     }
 
-    attachPrimaryChannel(dc, onOpen) {
-        this.dc = dc;
-
-        dc.onopen = () => {
-            console.log("[DC] open!");
-            this.log("🟢 conectado");
-            onOpen?.(dc);
-        };
-        dc.onclose = () => { console.log("[DC] closed"); };
-        dc.onerror = e => console.error("[DC] error:", e);
-        dc.onmessage = e => {
-            if (typeof e.data === "string") {
-                console.log("[DC] mensaje:", e.data);
-                this.log("📩 " + e.data);
+    attachTransport(transport) {
+        this.clearChannel();
+        this.transport = transport;
+        this.offMessage = transport.on(RTC_MODULE.CHAT, CHAT_MSG.TEXT, (peerId, packet) => {
+            const text = textDecoder.decode(packet.payload);
+            this.log("📩 " + text);
+            if (transport.isHost) {
+                transport.broadcastExcept(peerId, RTC_MODULE.CHAT, CHAT_MSG.TEXT, packet.payload);
             }
-        };
-    }
-
-    attachPassiveChannel(dc, clientId) {
-        dc.onclose = () => {};
-        dc.onerror = e => console.error(`[DC:${clientId}] error:`, e);
-        dc.onmessage = e => {
-            if (typeof e.data === "string") this.log("📩 " + e.data);
-        };
+        });
     }
 
     send() {
-        if (this.dc && this.dc.readyState === "open") {
-            this.dc.send(this.msgInput.value);
-            this.log("📤 " + this.msgInput.value);
-            this.msgInput.value = "";
-        } else {
+        const text = this.msgInput.value;
+        const payload = textEncoder.encode(text);
+
+        if (!this.transport) {
             this.log("⚠️ no conectado");
+            return;
         }
+
+        if (this.transport.isHost) {
+            this.transport.broadcast(RTC_MODULE.CHAT, CHAT_MSG.TEXT, payload);
+        } else if (!this.transport.send(RTC_MODULE.CHAT, CHAT_MSG.TEXT, payload)) {
+            this.log("⚠️ no conectado");
+            return;
+        }
+
+        this.log("📤 " + text);
+        this.msgInput.value = "";
     }
 
     log(text) {
@@ -113,6 +114,8 @@ export class ChatService {
     }
 
     clearChannel() {
-        this.dc = null;
+        if (this.offMessage) this.offMessage();
+        this.offMessage = null;
+        this.transport = null;
     }
 }

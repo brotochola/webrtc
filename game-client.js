@@ -27,6 +27,7 @@
 import { Player, PLAYER_COLORS, MAX_ENTITIES, resolveOwnCollision } from './game-physics.js';
 import { InputHandler }     from './game-input.js';
 import { ARENA_W, ARENA_H } from './game-renderer.js';
+import { RTC_CHANNEL, RTC_MODULE, GAME_MSG } from './rtc-protocol.js';
 
 /** Prediction error (px) above which we hard-snap instead of nudging. */
 const SNAP_THRESHOLD = 60;
@@ -59,11 +60,11 @@ const SPAWN_Y_FRACS = [0.5, 0.5, 0.35, 0.65, 0.25, 0.75, 0.15, 0.85];
  */
 export class GameClient {
     /**
-     * @param {RTCDataChannel} dc           - The "game" data channel (already open).
+     * @param {import('./rtc-transport.js').RtcClient} transport
      * @param {import('./game-renderer.js').GameRenderer} renderer
      */
-    constructor(dc, renderer) {
-        this._dc       = dc;
+    constructor(transport, renderer) {
+        this._transport = transport;
         this._renderer = renderer;
 
         /**
@@ -110,9 +111,16 @@ export class GameClient {
          */
         this._otherIds = [];
 
-        // Register the message handler before the first frame.
-        this._onMessage = this._handleMessage.bind(this);
-        this._dc.addEventListener('message', this._onMessage);
+        this._offSetup = this._transport.on(
+            RTC_MODULE.GAME,
+            GAME_MSG.SETUP,
+            (_peerId, packet) => this._handleSetup(packet),
+        );
+        this._offSnapshot = this._transport.on(
+            RTC_MODULE.GAME,
+            GAME_MSG.SNAPSHOT,
+            (_peerId, packet) => this._handleSnapshot(packet),
+        );
 
         /**
          * Keyboard input handler.
@@ -123,9 +131,12 @@ export class GameClient {
             if (this._myEntityId >= 0) {
                 this._players[this._myEntityId]?.setInput(ax, ay);
             }
-            if (this._dc.readyState === 'open') {
-                this._dc.send(new Int8Array([ax, ay]).buffer);
-            }
+            this._transport.send(
+                RTC_MODULE.GAME,
+                GAME_MSG.INPUT,
+                new Int8Array([ax, ay]),
+                { channel: RTC_CHANNEL.FAST },
+            );
         });
 
         // Kick off the rAF loop.
@@ -219,58 +230,59 @@ export class GameClient {
     }
 
     /**
-     * Handle incoming messages on the "game" data channel.
-     *
-     * Two message types (distinguished by byteLength):
-     *   1 byte  → setup packet: Int8Array([myEntityId]) from host
-     *   >4 bytes → broadcast:   Float32Array([frameNo, ts, N, px0, py0, vx0, vy0, …])
-     *
-     * @param {MessageEvent} e
+     * @param {{ payload: Uint8Array }} packet
      */
-    _handleMessage(e) {
-        if (!(e.data instanceof ArrayBuffer)) return;
+    _handleSetup(packet) {
+        if (packet.payload.byteLength !== 1) return;
+        this._initOwnPlayer(packet.payload[0]);
+    }
 
-        const buf = e.data;
+    /**
+     * @param {{ payload: Uint8Array }} packet
+     */
+    _handleSnapshot(packet) {
+        // Minimum: header (3 floats = 12 bytes) + 1 player (5 floats = 20 bytes)
+        if (packet.payload.byteLength < 32) return;
 
-        // ── Setup packet ──────────────────────────────────────────────────────
-        if (buf.byteLength === 1) {
-            const entityId = new Int8Array(buf)[0];
-            this._initOwnPlayer(entityId);
-            return;
-        }
-
-        // ── Broadcast packet ──────────────────────────────────────────────────
-        // Minimum: header (3 floats = 12 bytes) + 1 player (4 floats = 16 bytes)
-        if (buf.byteLength < 28) return;
-
-        const pkt          = new Float32Array(buf);
+        const pkt          = new Float32Array(packet.payload.slice().buffer);
         const playerCount  = Math.round(pkt[2]);
         const nowMs        = performance.now();
 
+        const activeIds = new Set();
+
         for (let i = 0; i < playerCount; i++) {
-            const base  = 3 + i * 4;
-            const posX  = pkt[base];
-            const posY  = pkt[base + 1];
-            const velX  = pkt[base + 2];
-            const velY  = pkt[base + 3];
+            const base  = 3 + i * 5;
+            const id    = Math.round(pkt[base]);
+            if (id < 0 || id >= MAX_ENTITIES) continue;
+
+            const posX  = pkt[base + 1];
+            const posY  = pkt[base + 2];
+            const velX  = pkt[base + 3];
+            const velY  = pkt[base + 4];
+            activeIds.add(id);
 
             // Lazily create a display Player for this entity slot if needed.
-            if (!this._players[i]) {
-                this._players[i] = new Player(
-                    i,
-                    PLAYER_COLORS[i],
+            if (!this._players[id]) {
+                this._players[id] = new Player(
+                    id,
+                    PLAYER_COLORS[id],
                     posX,
                     posY,
                 );
             }
 
             // Store authoritative snapshot for dead reckoning / reconciliation.
-            const snapBase = i * 4;
+            const snapBase = id * 4;
             this._snapPos[snapBase]     = posX;
             this._snapPos[snapBase + 1] = posY;
             this._snapPos[snapBase + 2] = velX;
             this._snapPos[snapBase + 3] = velY;
-            this._snapTimeMs[i]         = nowMs;
+            this._snapTimeMs[id]        = nowMs;
+        }
+
+        for (let id = 0; id < MAX_ENTITIES; id++) {
+            if (id === this._myEntityId) continue;
+            if (!activeIds.has(id)) this._players[id] = null;
         }
 
         // Measure packet interval for adaptive lerp.
@@ -322,7 +334,10 @@ export class GameClient {
             cancelAnimationFrame(this._rafId);
             this._rafId = null;
         }
-        this._dc.removeEventListener('message', this._onMessage);
+        if (this._offSetup) this._offSetup();
+        if (this._offSnapshot) this._offSnapshot();
+        this._offSetup = null;
+        this._offSnapshot = null;
         this._input.destroy();
     }
 }

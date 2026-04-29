@@ -4,9 +4,9 @@
  * This is the only file that index.html needs to import.
  * It hides the internal class hierarchy behind five functions:
  *
- *   initGameHost(containerEl)         — called once when host role is confirmed
- *   initGameClient(dc, containerEl)   — called when the client's game DC opens
- *   addGamePeer(clientId, dc)         — host calls this per new client DC open
+ *   initGameHost(containerEl, transport) — called once when host role is confirmed
+ *   initGameClient(transport, containerEl) — called when the client session starts
+ *   addGamePeer(clientId)             — host calls this per new client
  *   removeGamePeer(clientId)          — host calls this on client disconnect
  *   destroyGame()                     — tear everything down (leave / reconnect)
  *
@@ -39,12 +39,12 @@ let _renderer = null;
  *
  * @param {HTMLElement} containerEl - DOM node to inject the game panel into.
  */
-export function initGameHost(containerEl) {
+export function initGameHost(containerEl, transport) {
     destroyGame();
     console.log('[Game] init — role: host');
 
     _renderer = new GameRenderer(containerEl);
-    _host     = new GameHost(_renderer);
+    _host     = new GameHost(_renderer, transport);
     _host.start();
 }
 
@@ -55,32 +55,31 @@ export function initGameHost(containerEl) {
  * arrives later via a 1-byte setup packet from the host, so no entityId
  * argument is needed here.
  *
- * @param {RTCDataChannel} dc          - The "game" data channel (already open).
+ * @param {import('./rtc-transport.js').RtcClient} transport
  * @param {HTMLElement}    containerEl - DOM node to inject the game panel into.
  */
-export function initGameClient(dc, containerEl) {
+export function initGameClient(transport, containerEl) {
     destroyGame();
     console.log('[Game] init — role: client');
 
     _renderer = new GameRenderer(containerEl);
-    _client   = new GameClient(dc, _renderer);
+    _client   = new GameClient(transport, _renderer);
 }
 
 /**
  * Register a new client's game data channel with the host.
  *
  * Must only be called after initGameHost().  Safe to call from any async
- * context (e.g. inside gameDc.onopen).
+ * context (e.g. after the host transport registers a peer).
  *
- * @param {string}         clientId - Firebase presence key for this client.
- * @param {RTCDataChannel} dc       - The "game" data channel to this client.
+ * @param {string} clientId - Firebase presence key for this client.
  */
-export function addGamePeer(clientId, dc) {
+export function addGamePeer(clientId) {
     if (!_host) {
         console.warn('[Game] addGamePeer called but no host is running');
         return;
     }
-    _host.addPeer(clientId, dc);
+    _host.addPeer(clientId);
 }
 
 /**

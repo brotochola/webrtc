@@ -1,32 +1,29 @@
 /**
  * drawing.js — módulo de dibujo colaborativo
  *
- * Protocolo binario (ArrayBuffer, big-endian):
+ * Payloads binarios (ArrayBuffer, big-endian) enviados por el transporte RTC:
  *
- *   MSG_MOUSE      0x01  [type u8, x u16, y u16]                           5 bytes
- *   MSG_DRAW_BEGIN 0x02  [type u8, x u16, y u16, r u8, g u8, b u8, sz u8] 9 bytes
- *   MSG_DRAW_POINT 0x03  [type u8, x u16, y u16]                           5 bytes
- *   MSG_DRAW_END   0x04  [type u8]                                          1 byte
- *   MSG_CLEAR      0x05  [type u8]                                          1 byte
+ *   MOUSE      [x u16, y u16]                           4 bytes
+ *   DRAW_BEGIN [x u16, y u16, r u8, g u8, b u8, sz u8] 8 bytes
+ *   DRAW_POINT [x u16, y u16]                           4 bytes
+ *   DRAW_END   empty
+ *   CLEAR      empty
  *
  * Coordenadas normalizadas 0–65535 → independientes de la resolución del canvas.
  */
+
+import { RTC_MODULE, DRAWING_MSG } from "./rtc-protocol.js";
 
 const CANVAS_W = 900;
 const CANVAS_H = 540;
 const MAX_U16  = 65535;
 
-const MSG_MOUSE      = 0x01;
-const MSG_DRAW_BEGIN = 0x02;
-const MSG_DRAW_POINT = 0x03;
-const MSG_DRAW_END   = 0x04;
-const MSG_CLEAR      = 0x05;
-
 // ── Estado global del módulo ──────────────────────────────────────────────
 let wrapper, drawCanvas, cursorCanvas, drawCtx, cursorCtx;
-let dc;
+let transport;
 let rafId     = null;
 let listeners = [];   // para cleanup: [[el, event, fn], ...]
+let offPackets = [];
 
 // Estado local
 let isDrawing  = false;
@@ -35,18 +32,15 @@ let localSize  = 5;
 let localPrevX = 0, localPrevY = 0;
 let mousePending = false;
 
-// Estado remoto
-let remoteCursor    = null;   // { x, y } en coords de canvas
-let remoteDrawing   = false;
-let remoteColor     = "#ef4444";
-let remoteSize      = 5;
-let remotePrevX     = 0, remotePrevY = 0;
+// Estado remoto, indexado por peerId (host) o sourceId (clientes).
+let remotePeers = new Map();
+let sourceIds = new Map();
+let nextSourceId = 1;
 
 // ── Init / Destroy ────────────────────────────────────────────────────────
 
-export function initDrawing(dataChannel, containerEl) {
-    dc = dataChannel;
-    dc.binaryType = "arraybuffer";
+export function initDrawing(rtcTransport, containerEl) {
+    transport = rtcTransport;
 
     // Wrapper total
     wrapper = document.createElement("div");
@@ -87,7 +81,7 @@ export function initDrawing(dataChannel, containerEl) {
     const clearBtn = document.createElement("button");
     clearBtn.textContent = "🗑️ Limpiar";
     clearBtn.className   = "action secondary drawing-btn";
-    on(clearBtn, "click", () => { clearCanvas(); sendMsg(buildByte(MSG_CLEAR)); });
+    on(clearBtn, "click", () => { clearCanvas(); sendMsg(DRAWING_MSG.CLEAR); });
 
     toolbar.append(colorInput, sizeWrap, eraserBtn, clearBtn);
 
@@ -126,8 +120,10 @@ export function initDrawing(dataChannel, containerEl) {
     on(cursorCanvas, "touchend",    handleTouchEnd,   { passive: false });
     on(cursorCanvas, "touchcancel", handleTouchEnd,   { passive: false });
 
-    // Mensajes binarios del peer
-    on(dc, "message", handleMessage);
+    // Mensajes binarios del transporte RTC.
+    for (const type of Object.values(DRAWING_MSG)) {
+        offPackets.push(transport.on(RTC_MODULE.DRAWING, type, handlePacket));
+    }
 
     rafId = requestAnimationFrame(renderCursors);
     console.log("[drawing] inicializado");
@@ -137,12 +133,15 @@ export function destroyDrawing() {
     if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
     listeners.forEach(([el, ev, fn, opts]) => el.removeEventListener(ev, fn, opts));
     listeners = [];
+    offPackets.forEach(off => off());
+    offPackets = [];
     wrapper?.remove();      wrapper      = null;
     drawCanvas?.remove();   drawCanvas   = null; drawCtx   = null;
     cursorCanvas?.remove(); cursorCanvas = null; cursorCtx = null;
-    dc = null;
-    remoteCursor  = null;
-    remoteDrawing = false;
+    transport = null;
+    remotePeers.clear();
+    sourceIds.clear();
+    nextSourceId = 1;
     isDrawing     = false;
     console.log("[drawing] destruido");
 }
@@ -157,16 +156,16 @@ function handleMouseMove(e) {
         const [px, py] = toCanvas(localPrevX, localPrevY);
         drawLine(drawCtx, px, py, cx, cy, localColor, localSize);
         localPrevX = nx; localPrevY = ny;
-        sendMsg(buildPoint(MSG_DRAW_POINT, nx, ny));
-        // No enviar MSG_MOUSE por separado mientras se dibuja:
-        // el peer actualiza su cursor con los MSG_DRAW_POINT
+        sendMsg(DRAWING_MSG.DRAW_POINT, buildPoint(nx, ny));
+        // No enviar movimiento separado mientras se dibuja:
+        // el peer actualiza su cursor con los puntos de trazo.
     } else {
         // Solo movimiento → throttle a 1 msg/frame
         if (!mousePending) {
             mousePending = true;
             requestAnimationFrame(() => {
                 mousePending = false;
-                sendMsg(buildPoint(MSG_MOUSE, nx, ny));
+                sendMsg(DRAWING_MSG.MOUSE, buildPoint(nx, ny));
             });
         }
     }
@@ -177,19 +176,19 @@ function handleMouseDown(e) {
     const [nx, ny] = norm(e.clientX, e.clientY);
     isDrawing  = true;
     localPrevX = nx; localPrevY = ny;
-    sendMsg(buildDrawBegin(nx, ny));
+    sendMsg(DRAWING_MSG.DRAW_BEGIN, buildDrawBegin(nx, ny));
 }
 
 function handleMouseUp() {
     if (!isDrawing) return;
     isDrawing = false;
-    sendMsg(buildByte(MSG_DRAW_END));
+    sendMsg(DRAWING_MSG.DRAW_END);
 }
 
 function handleMouseLeave() {
     if (!isDrawing) return;
     isDrawing = false;
-    sendMsg(buildByte(MSG_DRAW_END));
+    sendMsg(DRAWING_MSG.DRAW_END);
 }
 
 // ── Eventos táctiles ──────────────────────────────────────────────────────
@@ -201,7 +200,7 @@ function handleTouchStart(e) {
     const [nx, ny] = norm(t.clientX, t.clientY);
     isDrawing  = true;
     localPrevX = nx; localPrevY = ny;
-    sendMsg(buildDrawBegin(nx, ny));
+    sendMsg(DRAWING_MSG.DRAW_BEGIN, buildDrawBegin(nx, ny));
 }
 
 function handleTouchMove(e) {
@@ -213,92 +212,143 @@ function handleTouchMove(e) {
     const [px, py] = toCanvas(localPrevX, localPrevY);
     drawLine(drawCtx, px, py, cx, cy, localColor, localSize);
     localPrevX = nx; localPrevY = ny;
-    sendMsg(buildPoint(MSG_DRAW_POINT, nx, ny));
+    sendMsg(DRAWING_MSG.DRAW_POINT, buildPoint(nx, ny));
 }
 
 function handleTouchEnd(e) {
     e.preventDefault();
     if (!isDrawing) return;
     isDrawing = false;
-    sendMsg(buildByte(MSG_DRAW_END));
+    sendMsg(DRAWING_MSG.DRAW_END);
 }
 
 // ── Recepción ─────────────────────────────────────────────────────────────
 
-function handleMessage(e) {
-    if (!(e.data instanceof ArrayBuffer)) return;
-    const v = new DataView(e.data);
-    if (v.byteLength < 1) return;
+function handlePacket(peerId, packet) {
+    const type = packet.messageType;
 
-    switch (v.getUint8(0)) {
-        case MSG_MOUSE: {
-            if (v.byteLength < 5) break;
-            const [x, y] = fromNorm(v, 1);
-            remoteCursor = { x, y };
+    if (transport?.isHost) {
+        applyRemotePacket(peerId, type, packet.payloadView);
+        transport.broadcastExcept(
+            peerId,
+            RTC_MODULE.DRAWING,
+            type,
+            withSourceId(sourceIdForPeer(peerId), packet.payload),
+        );
+        return;
+    }
+
+    if (packet.payload.byteLength < 1) return;
+    const sourceId = packet.payload[0];
+    const view = new DataView(
+        packet.payload.buffer,
+        packet.payload.byteOffset + 1,
+        packet.payload.byteLength - 1,
+    );
+    applyRemotePacket(sourceId, type, view);
+}
+
+function applyRemotePacket(remoteId, type, v) {
+    const state = remoteState(remoteId);
+
+    switch (type) {
+        case DRAWING_MSG.MOUSE: {
+            if (v.byteLength < 4) break;
+            const [x, y] = fromNorm(v, 0);
+            state.cursor = { x, y };
             break;
         }
-        case MSG_DRAW_BEGIN: {
-            if (v.byteLength < 9) break;
-            const [x, y] = fromNorm(v, 1);
-            remoteColor   = `rgb(${v.getUint8(5)},${v.getUint8(6)},${v.getUint8(7)})`;
-            remoteSize    = v.getUint8(8);
-            remoteDrawing = true;
-            remotePrevX   = x; remotePrevY = y;
-            remoteCursor  = { x, y };
+        case DRAWING_MSG.DRAW_BEGIN: {
+            if (v.byteLength < 8) break;
+            const [x, y] = fromNorm(v, 0);
+            state.color   = `rgb(${v.getUint8(4)},${v.getUint8(5)},${v.getUint8(6)})`;
+            state.size    = v.getUint8(7);
+            state.drawing = true;
+            state.prevX   = x; state.prevY = y;
+            state.cursor  = { x, y };
             break;
         }
-        case MSG_DRAW_POINT: {
-            if (v.byteLength < 5) break;
-            const [x, y] = fromNorm(v, 1);
-            if (remoteDrawing) {
-                drawLine(drawCtx, remotePrevX, remotePrevY, x, y, remoteColor, remoteSize);
+        case DRAWING_MSG.DRAW_POINT: {
+            if (v.byteLength < 4) break;
+            const [x, y] = fromNorm(v, 0);
+            if (state.drawing) {
+                drawLine(drawCtx, state.prevX, state.prevY, x, y, state.color, state.size);
             }
-            remotePrevX  = x; remotePrevY = y;
-            remoteCursor = { x, y };
+            state.prevX  = x; state.prevY = y;
+            state.cursor = { x, y };
             break;
         }
-        case MSG_DRAW_END: {
-            remoteDrawing = false;
+        case DRAWING_MSG.DRAW_END: {
+            state.drawing = false;
             break;
         }
-        case MSG_CLEAR: {
+        case DRAWING_MSG.CLEAR: {
             clearCanvas();
+            remotePeers.clear();
             break;
         }
     }
 }
 
-// ── Constructores de mensajes ─────────────────────────────────────────────
-
-function buildByte(type) {
-    return new Uint8Array([type]).buffer;
+function remoteState(remoteId) {
+    if (!remotePeers.has(remoteId)) {
+        remotePeers.set(remoteId, {
+            cursor: null,
+            drawing: false,
+            color: "#ef4444",
+            size: 5,
+            prevX: 0,
+            prevY: 0,
+        });
+    }
+    return remotePeers.get(remoteId);
 }
 
-function buildPoint(type, nx, ny) {
-    const buf = new ArrayBuffer(5);
+// ── Constructores de mensajes ─────────────────────────────────────────────
+
+function buildPoint(nx, ny) {
+    const buf = new ArrayBuffer(4);
     const v   = new DataView(buf);
-    v.setUint8(0, type);
-    v.setUint16(1, nx, false);
-    v.setUint16(3, ny, false);
+    v.setUint16(0, nx, false);
+    v.setUint16(2, ny, false);
     return buf;
 }
 
 function buildDrawBegin(nx, ny) {
-    const buf = new ArrayBuffer(9);
+    const buf = new ArrayBuffer(8);
     const v   = new DataView(buf);
     const hex = localColor.replace("#", "");
-    v.setUint8(0, MSG_DRAW_BEGIN);
-    v.setUint16(1, nx, false);
-    v.setUint16(3, ny, false);
-    v.setUint8(5, parseInt(hex.slice(0, 2), 16));
-    v.setUint8(6, parseInt(hex.slice(2, 4), 16));
-    v.setUint8(7, parseInt(hex.slice(4, 6), 16));
-    v.setUint8(8, Math.min(255, Math.max(1, Math.round(localSize))));
+    v.setUint16(0, nx, false);
+    v.setUint16(2, ny, false);
+    v.setUint8(4, parseInt(hex.slice(0, 2), 16));
+    v.setUint8(5, parseInt(hex.slice(2, 4), 16));
+    v.setUint8(6, parseInt(hex.slice(4, 6), 16));
+    v.setUint8(7, Math.min(255, Math.max(1, Math.round(localSize))));
     return buf;
 }
 
-function sendMsg(buf) {
-    if (dc && dc.readyState === "open") dc.send(buf);
+function sendMsg(type, payload = null) {
+    if (!transport) return;
+    if (transport.isHost) {
+        transport.broadcast(RTC_MODULE.DRAWING, type, withSourceId(0, payload));
+    } else {
+        transport.send(RTC_MODULE.DRAWING, type, payload);
+    }
+}
+
+function sourceIdForPeer(peerId) {
+    if (!sourceIds.has(peerId)) sourceIds.set(peerId, nextSourceId++);
+    return sourceIds.get(peerId);
+}
+
+function withSourceId(sourceId, payload = null) {
+    const payloadBytes = payload
+        ? new Uint8Array(payload.buffer ?? payload, payload.byteOffset ?? 0, payload.byteLength ?? payload.byteLength)
+        : new Uint8Array(0);
+    const out = new Uint8Array(1 + payloadBytes.byteLength);
+    out[0] = sourceId & 0xff;
+    out.set(payloadBytes, 1);
+    return out;
 }
 
 // ── Canvas helpers ────────────────────────────────────────────────────────
@@ -340,7 +390,9 @@ function drawGrid(ctx) {
 function renderCursors() {
     if (!cursorCtx) return;
     cursorCtx.clearRect(0, 0, CANVAS_W, CANVAS_H);
-    if (remoteCursor) drawRemoteCursor(remoteCursor.x, remoteCursor.y, remoteDrawing);
+    for (const state of remotePeers.values()) {
+        if (state.cursor) drawRemoteCursor(state.cursor.x, state.cursor.y, state.drawing);
+    }
     rafId = requestAnimationFrame(renderCursors);
 }
 
